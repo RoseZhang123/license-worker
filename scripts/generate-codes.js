@@ -1,10 +1,10 @@
 import { randomBytes } from "node:crypto";
 
 const GROUPS = [
-  { prefix: "AE-PM", plan: "PERSONAL_MONTHLY", mode: "consumer", duration_days: 30, count: 20 },
-  { prefix: "AE-PY", plan: "PERSONAL_YEARLY", mode: "consumer", duration_days: 365, count: 20 },
-  { prefix: "AE-EM", plan: "ENTERPRISE_MONTHLY", mode: "enterprise", duration_days: 30, count: 20 },
-  { prefix: "AE-EY", plan: "ENTERPRISE_YEARLY", mode: "enterprise", duration_days: 365, count: 20 }
+  { prefix: "AE-PM", plan: "PERSONAL_MONTHLY", mode: "consumer", count: 20 },
+  { prefix: "AE-PY", plan: "PERSONAL_YEARLY", mode: "consumer", count: 20 },
+  { prefix: "AE-EM", plan: "ENTERPRISE_MONTHLY", mode: "enterprise", count: 20 },
+  { prefix: "AE-EY", plan: "ENTERPRISE_YEARLY", mode: "enterprise", count: 20 }
 ];
 
 function token(bytes = 6) {
@@ -34,7 +34,6 @@ for (const group of GROUPS) {
       code: normalizeCode(code),
       plan: group.plan,
       mode: group.mode,
-      duration_days: group.duration_days,
       status: "unused",
       created_at: createdAt,
       note: `internal testing display_code=${code}`
@@ -44,12 +43,11 @@ for (const group of GROUPS) {
 
 console.log("-- ApplyEase internal testing activation codes");
 console.log("-- Import with: wrangler d1 execute applyease-license --file ./seed-codes.sql --remote");
-console.log("INSERT INTO activation_codes (code, plan, mode, duration_days, status, created_at, note) VALUES");
+console.log("INSERT INTO activation_codes (code, plan, mode, status, created_at, note) VALUES");
 console.log(rows.map((row) => `  (${[
   row.code,
   row.plan,
   row.mode,
-  row.duration_days,
   row.status,
   row.created_at,
   row.note

@@ -2,7 +2,6 @@ CREATE TABLE IF NOT EXISTS activation_codes (
   code TEXT PRIMARY KEY,
   plan TEXT NOT NULL,
   mode TEXT NOT NULL,
-  duration_days INTEGER NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('unused', 'used', 'revoked')),
   created_at TEXT NOT NULL,
   used_at TEXT,

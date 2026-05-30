@@ -117,7 +117,7 @@ async function readJson(request) {
 
 async function findActivationCode(db, code) {
   return db.prepare(
-    "SELECT code, plan, mode, duration_days, status, used_at, license_id, device_id FROM activation_codes WHERE code = ?"
+    "SELECT code, plan, mode, status, used_at, license_id, device_id FROM activation_codes WHERE code = ?"
   ).bind(code).first();
 }
 

@@ -92,7 +92,6 @@ class FakeD1 {
       code,
       plan: "PERSONAL_MONTHLY",
       mode: "consumer",
-      duration_days: 30,
       status: "unused",
       created_at: "2026-05-30T00:00:00.000Z",
       used_at: null,
@@ -143,8 +142,7 @@ test("plan period uses calendar month and calendar year", () => {
 test("activate redeems an unused code and creates a license", async () => {
   const db = new FakeD1();
   db.addCode("AEPYABCD1234", {
-    plan: "PERSONAL_YEARLY",
-    duration_days: 365
+    plan: "PERSONAL_YEARLY"
   });
 
   const response = await worker.fetch(post("/api/license/activate", {
@@ -249,8 +247,7 @@ test("renew extends an active license from its current expiry", async () => {
   });
   db.addCode("AEPYRENEW001", {
     plan: "PERSONAL_YEARLY",
-    mode: "consumer",
-    duration_days: 365
+    mode: "consumer"
   });
 
   const response = await worker.fetch(post("/api/license/renew", {
@@ -284,8 +281,7 @@ test("renew reactivates an expired license from now", async () => {
   });
   db.addCode("AEPMRENEW002", {
     plan: "PERSONAL_MONTHLY",
-    mode: "consumer",
-    duration_days: 30
+    mode: "consumer"
   });
 
   const before = Date.now();
@@ -319,8 +315,7 @@ test("renew rejects mismatched device and cross-mode renewal code", async () => 
   });
   db.addCode("AEPMBADMODE01", {
     plan: "PERSONAL_MONTHLY",
-    mode: "consumer",
-    duration_days: 30
+    mode: "consumer"
   });
 
   const deviceResponse = await worker.fetch(post("/api/license/renew", {
