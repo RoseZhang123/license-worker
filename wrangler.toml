@@ -1,0 +1,14 @@
+name = "applyease-license-api"
+main = "src/worker.js"
+compatibility_date = "2026-05-30"
+
+workers_dev = true
+
+[vars]
+ALLOWED_ORIGIN = "*"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "applyease-license"
+database_id = "1ea2cd29-a816-4729-b0cc-d82340c01830"
+

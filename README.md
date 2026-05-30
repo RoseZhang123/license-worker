@@ -1,0 +1,141 @@
+# ApplyEase License Worker
+
+Minimal production license API for one-time activation codes.
+
+## Purpose
+
+The Chrome extension's bundled activation codes are for internal testing only.
+Before public paid launch, paid codes should be checked by this backend so that
+each code can be redeemed once, tied to a local device ID, and verified later.
+
+The API stores only license and support metadata. It must not receive student
+application profiles.
+
+## Endpoints
+
+### `POST /api/license/activate`
+
+Request:
+
+```json
+{
+  "code": "AE-PY-XXXX-XXXX",
+  "device_id": "local-device-id",
+  "extension_version": "0.1.0"
+}
+```
+
+Success:
+
+```json
+{
+  "ok": true,
+  "license": {
+    "license_id": "lic_xxx",
+    "mode": "consumer",
+    "plan": "PERSONAL_YEARLY",
+    "activated_at": "2026-05-30T00:00:00.000Z",
+    "expires_at": "2027-05-30T00:00:00.000Z",
+    "status": "active"
+  }
+}
+```
+
+### `POST /api/license/verify`
+
+Request:
+
+```json
+{
+  "license_id": "lic_xxx",
+  "device_id": "local-device-id"
+}
+```
+
+### `POST /api/license/renew`
+
+Use this after a paid renewal. The renewal code must be unused and must match
+the existing license mode. Active licenses are extended from the current
+`expires_at`; expired licenses are extended from the current server time.
+
+Request:
+
+```json
+{
+  "license_id": "lic_xxx",
+  "code": "AE-PY-RENEW-XXXX",
+  "device_id": "local-device-id"
+}
+```
+
+Success:
+
+```json
+{
+  "ok": true,
+  "renewed": true,
+  "license": {
+    "license_id": "lic_xxx",
+    "mode": "consumer",
+    "plan": "PERSONAL_YEARLY",
+    "activated_at": "2026-05-30T00:00:00.000Z",
+    "expires_at": "2028-05-30T00:00:00.000Z",
+    "status": "active"
+  }
+}
+```
+
+Success:
+
+```json
+{
+  "ok": true,
+  "license": {
+    "license_id": "lic_xxx",
+    "mode": "consumer",
+    "plan": "PERSONAL_YEARLY",
+    "activated_at": "2026-05-30T00:00:00.000Z",
+    "expires_at": "2027-05-30T00:00:00.000Z",
+    "status": "active"
+  }
+}
+```
+
+## Local setup
+
+1. Create a D1 database in Cloudflare.
+2. Copy `wrangler.toml.example` to `wrangler.toml`.
+3. Fill in the D1 `database_id`.
+4. Apply schema:
+
+```bash
+wrangler d1 execute applyease-license --file ./schema.sql --remote
+```
+
+5. Generate testing codes:
+
+```bash
+npm run generate:codes > seed-codes.sql
+wrangler d1 execute applyease-license --file ./seed-codes.sql --remote
+```
+
+The database stores normalized codes without spaces or hyphens. The seed script
+keeps the hyphenated display code in the `note` column for manual sending and
+support lookup.
+
+6. Deploy:
+
+```bash
+wrangler deploy
+```
+
+## Notes
+
+- Real paid activation codes must not be bundled into the extension.
+- `b` / `c` development shortcuts should stay development-only.
+- The API currently allows same-device activation retry to return the existing
+  active license. A different `device_id` receives `CODE_ALREADY_USED`.
+- Renewal uses a new unused activation code and updates the existing license
+  instead of creating a second license.
+- If a user changes device, support can manually reset `device_id` or revoke and
+  reissue a license after confirming the order.

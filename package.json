@@ -1,0 +1,10 @@
+{
+  "name": "applyease-license-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "generate:codes": "node scripts/generate-codes.js"
+  }
+}
+

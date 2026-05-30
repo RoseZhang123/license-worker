@@ -1,0 +1,17 @@
+name = "applyease-license-api"
+main = "src/worker.js"
+compatibility_date = "2026-05-30"
+
+# Copy this file to wrangler.toml after creating the D1 database.
+# Do not commit production account IDs, database IDs, or secrets.
+
+workers_dev = true
+
+[vars]
+ALLOWED_ORIGIN = "*"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "applyease-license"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
