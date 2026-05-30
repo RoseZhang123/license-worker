@@ -46,10 +46,31 @@ function normalizeDeviceId(raw) {
   return String(raw || "").trim().slice(0, 120);
 }
 
-function addDays(date, days) {
+function addCalendarMonths(date, months) {
   const next = new Date(date.getTime());
-  next.setUTCDate(next.getUTCDate() + Number(days || 0));
+  const targetMonth = next.getUTCMonth() + Number(months || 0);
+  const originalDay = next.getUTCDate();
+
+  next.setUTCDate(1);
+  next.setUTCMonth(targetMonth);
+
+  const daysInTargetMonth = new Date(Date.UTC(
+    next.getUTCFullYear(),
+    next.getUTCMonth() + 1,
+    0
+  )).getUTCDate();
+  next.setUTCDate(Math.min(originalDay, daysInTargetMonth));
   return next;
+}
+
+function addPlanPeriod(date, plan) {
+  if (String(plan || "").endsWith("_YEARLY")) {
+    return addCalendarMonths(date, 12);
+  }
+  if (String(plan || "").endsWith("_MONTHLY")) {
+    return addCalendarMonths(date, 1);
+  }
+  return addCalendarMonths(date, 1);
 }
 
 function publicLicense(row) {
@@ -135,7 +156,7 @@ async function activateLicense(request, env) {
   }
 
   const activatedAt = new Date();
-  const expiresAt = addDays(activatedAt, activation.duration_days);
+  const expiresAt = addPlanPeriod(activatedAt, activation.plan);
   const licenseId = `lic_${crypto.randomUUID()}`;
 
   const update = await env.DB.prepare(
@@ -214,7 +235,7 @@ async function renewLicense(request, env) {
   const now = new Date();
   const currentExpiry = new Date(license.expires_at);
   const baseDate = currentExpiry.getTime() > now.getTime() ? currentExpiry : now;
-  const nextExpiry = addDays(baseDate, activation.duration_days);
+  const nextExpiry = addPlanPeriod(baseDate, activation.plan);
 
   const update = await env.DB.prepare(
     "UPDATE activation_codes SET status = 'used', used_at = ?, license_id = ?, device_id = ? WHERE code = ? AND status = 'unused'"
@@ -258,7 +279,8 @@ export default {
 };
 
 export const __TEST_HOOKS__ = {
-  addDays,
+  addCalendarMonths,
+  addPlanPeriod,
   normalizeCode,
   normalizeDeviceId,
   publicLicense,

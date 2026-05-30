@@ -126,6 +126,20 @@ test("normalizeCode removes spaces and hyphens", () => {
   assert.equal(__TEST_HOOKS__.normalizeCode(" ae-py-abcd-1234 "), "AEPYABCD1234");
 });
 
+test("plan period uses calendar month and calendar year", () => {
+  const jan31 = new Date("2026-01-31T12:00:00.000Z");
+  const leapDay = new Date("2024-02-29T12:00:00.000Z");
+
+  assert.equal(
+    __TEST_HOOKS__.addPlanPeriod(jan31, "PERSONAL_MONTHLY").toISOString(),
+    "2026-02-28T12:00:00.000Z"
+  );
+  assert.equal(
+    __TEST_HOOKS__.addPlanPeriod(leapDay, "PERSONAL_YEARLY").toISOString(),
+    "2025-02-28T12:00:00.000Z"
+  );
+});
+
 test("activate redeems an unused code and creates a license", async () => {
   const db = new FakeD1();
   db.addCode("AEPYABCD1234", {
