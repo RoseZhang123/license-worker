@@ -19,6 +19,8 @@ const ERROR_STATUS = {
 
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const RATE_LIMIT_MAX = 30;
+const FEEDBACK_MESSAGE_MAX = 2000;
+const FEEDBACK_CONTACT_MAX = 160;
 const rateBuckets = new Map();
 
 function corsHeaders(env = {}) {
@@ -44,6 +46,48 @@ function normalizeCode(raw) {
 
 function normalizeDeviceId(raw) {
   return String(raw || "").trim().slice(0, 120);
+}
+
+function normalizeFeedbackType(raw) {
+  const value = String(raw || "").trim().toLowerCase();
+  return value === "bug" || value === "suggestion" ? value : "";
+}
+
+function sanitizeText(raw, maxLength) {
+  return String(raw || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function sanitizeMultiline(raw, maxLength) {
+  return String(raw || "")
+    .replace(/\r/g, "")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function escapeHtml(raw) {
+  return String(raw || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function normalizeFeedbackPayload(body = {}) {
+  const type = normalizeFeedbackType(body.type);
+  const message = sanitizeMultiline(body.message, FEEDBACK_MESSAGE_MAX);
+  const contact = sanitizeText(body.contact, FEEDBACK_CONTACT_MAX);
+  const accountMode = sanitizeText(body.account_mode, 40);
+  const licenseId = sanitizeText(body.license_id, 120);
+  const pageUrl = sanitizeText(body.page_url, 500);
+  const extensionVersion = sanitizeText(body.extension_version, 40);
+  const school = sanitizeText(body.page?.school, 40);
+  const isApplicationForm = Boolean(body.page?.isApplicationForm);
+  const diagnostic = body.diagnostic && typeof body.diagnostic === "object" ? body.diagnostic : null;
+  return { type, message, contact, accountMode, licenseId, pageUrl, extensionVersion, school, isApplicationForm, diagnostic };
 }
 
 function addCalendarMonths(date, months) {
@@ -253,6 +297,78 @@ async function renewLicense(request, env) {
   return json({ ok: true, license: publicLicense(renewed), renewed: true }, 200, env);
 }
 
+function buildFeedbackEmail(feedback) {
+  const label = feedback.type === "bug" ? "Bug report" : "Improvement suggestion";
+  const subject = `[ApplyEase] ${label}`;
+  const text = [
+    `${label}`,
+    "",
+    `Contact: ${feedback.contact}`,
+    `Account mode: ${feedback.accountMode || "unknown"}`,
+    `License ID: ${feedback.licenseId || "not provided"}`,
+    `Extension version: ${feedback.extensionVersion || "unknown"}`,
+    `Page: ${feedback.pageUrl || "not provided"}`,
+    `School: ${feedback.school || "unknown"}`,
+    `Application form: ${feedback.isApplicationForm ? "yes" : "no"}`,
+    `Diagnostic summary included: ${feedback.diagnostic ? "yes" : "no"}`,
+    "",
+    "Message:",
+    feedback.message
+  ].join("\n");
+  const html = `
+    <h2>${escapeHtml(label)}</h2>
+    <p><strong>Contact:</strong> ${escapeHtml(feedback.contact)}</p>
+    <p><strong>Account mode:</strong> ${escapeHtml(feedback.accountMode || "unknown")}</p>
+    <p><strong>License ID:</strong> ${escapeHtml(feedback.licenseId || "not provided")}</p>
+    <p><strong>Extension version:</strong> ${escapeHtml(feedback.extensionVersion || "unknown")}</p>
+    <p><strong>Page:</strong> ${escapeHtml(feedback.pageUrl || "not provided")}</p>
+    <p><strong>School:</strong> ${escapeHtml(feedback.school || "unknown")}</p>
+    <p><strong>Application form:</strong> ${feedback.isApplicationForm ? "yes" : "no"}</p>
+    <p><strong>Diagnostic summary included:</strong> ${feedback.diagnostic ? "yes" : "no"}</p>
+    <h3>Message</h3>
+    <pre style="white-space:pre-wrap;font-family:system-ui,sans-serif">${escapeHtml(feedback.message)}</pre>
+    ${feedback.diagnostic ? `<h3>Diagnostic summary</h3><pre style="white-space:pre-wrap;font-family:ui-monospace,monospace">${escapeHtml(JSON.stringify(feedback.diagnostic, null, 2)).slice(0, 12000)}</pre>` : ""}
+  `;
+  return { subject, text, html };
+}
+
+async function submitFeedback(request, env) {
+  if (!checkRateLimit(request)) return errorResponse("RATE_LIMITED", env);
+  const body = await readJson(request);
+  if (!body) return errorResponse("BAD_REQUEST", env);
+
+  const feedback = normalizeFeedbackPayload(body);
+  if (!feedback.type || feedback.message.length < 10 || !feedback.contact) {
+    return errorResponse("BAD_REQUEST", env);
+  }
+
+  const email = buildFeedbackEmail(feedback);
+  const to = env.SUPPORT_EMAIL || "support@applyease.cn";
+  const from = env.FEEDBACK_FROM_EMAIL || "support@applyease.cn";
+  let emailed = false;
+
+  if (env.EMAIL?.send) {
+    const emailPayload = {
+      to,
+      from: { email: from, name: "ApplyEase Feedback" },
+      subject: email.subject,
+      text: email.text,
+      html: email.html
+    };
+    if (feedback.contact.includes("@")) emailPayload.replyTo = feedback.contact;
+    await env.EMAIL.send(emailPayload);
+    emailed = true;
+  } else {
+    console.log("applyease feedback received", {
+      ...feedback,
+      messageLength: feedback.message.length,
+      message: undefined
+    });
+  }
+
+  return json({ ok: true, emailed }, 200, env);
+}
+
 async function route(request, env) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders(env) });
@@ -263,6 +379,7 @@ async function route(request, env) {
   if (url.pathname === "/api/license/activate") return activateLicense(request, env);
   if (url.pathname === "/api/license/verify") return verifyLicense(request, env);
   if (url.pathname === "/api/license/renew") return renewLicense(request, env);
+  if (url.pathname === "/api/feedback") return submitFeedback(request, env);
   return errorResponse("BAD_REQUEST", env);
 }
 

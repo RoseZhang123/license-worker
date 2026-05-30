@@ -6,9 +6,13 @@ workers_dev = true
 
 [vars]
 ALLOWED_ORIGIN = "*"
+SUPPORT_EMAIL = "support@applyease.cn"
+FEEDBACK_FROM_EMAIL = "support@applyease.cn"
+
+# Enable after Cloudflare Email Sending is onboarded for the sender domain:
+# send_email = [{ name = "EMAIL" }]
 
 [[d1_databases]]
 binding = "DB"
 database_name = "applyease-license"
 database_id = "1ea2cd29-a816-4729-b0cc-d82340c01830"
-

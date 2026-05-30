@@ -106,6 +106,25 @@ function env(db = new FakeD1()) {
   return { DB: db, ALLOWED_ORIGIN: "chrome-extension://test" };
 }
 
+function envWithEmail(db = new FakeD1()) {
+  const sent = [];
+  return {
+    env: {
+      DB: db,
+      ALLOWED_ORIGIN: "chrome-extension://test",
+      SUPPORT_EMAIL: "owner@example.com",
+      FEEDBACK_FROM_EMAIL: "support@example.com",
+      EMAIL: {
+        send: async (message) => {
+          sent.push(message);
+          return { messageId: "msg_test" };
+        }
+      }
+    },
+    sent
+  };
+}
+
 function post(path, body, ip = "127.0.0.1") {
   return new Request(`https://license.applyease.test${path}`, {
     method: "POST",
@@ -334,4 +353,55 @@ test("renew rejects mismatched device and cross-mode renewal code", async () => 
   assert.equal(modeResponse.status, 400);
   assert.equal((await readJson(modeResponse)).error, "BAD_REQUEST");
   assert.equal(db.activationCodes.get("AEPMBADMODE01").status, "unused");
+});
+
+test("feedback endpoint validates payload and sends support email when configured", async () => {
+  const { env: testEnv, sent } = envWithEmail();
+  const response = await worker.fetch(post("/api/feedback", {
+    type: "bug",
+    message: "Autofill stopped on the NTU application page after clicking Start Filling.",
+    contact: "student@example.com",
+    account_mode: "consumer",
+    license_id: "lic_feedback",
+    page_url: "https://gradadmissions.ntu.edu.sg/apply/frm",
+    page: { school: "ntu", isApplicationForm: true },
+    extension_version: "0.1.0",
+    diagnostic: {
+      schema: "applyease_diagnostic_report_v1",
+      context: { accountMode: "consumer", school: "ntu" },
+      events: []
+    }
+  }), testEnv);
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.emailed, true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].to, "owner@example.com");
+  assert.equal(sent[0].from.email, "support@example.com");
+  assert.equal(sent[0].replyTo, "student@example.com");
+  assert.match(sent[0].subject, /Bug report/);
+  assert.match(sent[0].text, /lic_feedback/);
+  assert.match(sent[0].text, /Diagnostic summary included: yes/);
+  assert.match(sent[0].html, /Autofill stopped/);
+  assert.match(sent[0].html, /applyease_diagnostic_report_v1/);
+});
+
+test("feedback endpoint rejects missing contact or too-short message", async () => {
+  const badContact = await worker.fetch(post("/api/feedback", {
+    type: "suggestion",
+    message: "Please support more schools soon.",
+    contact: ""
+  }), env());
+  const badMessage = await worker.fetch(post("/api/feedback", {
+    type: "bug",
+    message: "short",
+    contact: "wechat-id"
+  }), env());
+
+  assert.equal(badContact.status, 400);
+  assert.equal((await readJson(badContact)).error, "BAD_REQUEST");
+  assert.equal(badMessage.status, 400);
+  assert.equal((await readJson(badMessage)).error, "BAD_REQUEST");
 });
