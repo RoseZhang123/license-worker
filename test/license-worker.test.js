@@ -293,11 +293,11 @@ test("renew reactivates an expired license from now", async () => {
 
 test("renew rejects mismatched device and cross-mode renewal code", async () => {
   const db = new FakeD1();
-  db.licenses.set("lic_team", {
-    license_id: "lic_team",
+  db.licenses.set("lic_enterprise", {
+    license_id: "lic_enterprise",
     code: "ORIGINAL",
     plan: "ENTERPRISE_MONTHLY",
-    mode: "team",
+    mode: "enterprise",
     activated_at: "2026-01-01T00:00:00.000Z",
     expires_at: "2999-01-01T00:00:00.000Z",
     device_id: "device-a",
@@ -310,12 +310,12 @@ test("renew rejects mismatched device and cross-mode renewal code", async () => 
   });
 
   const deviceResponse = await worker.fetch(post("/api/license/renew", {
-    license_id: "lic_team",
+    license_id: "lic_enterprise",
     code: "AE-PM-BADMODE-01",
     device_id: "device-b"
   }), env(db));
   const modeResponse = await worker.fetch(post("/api/license/renew", {
-    license_id: "lic_team",
+    license_id: "lic_enterprise",
     code: "AE-PM-BADMODE-01",
     device_id: "device-a"
   }), env(db));

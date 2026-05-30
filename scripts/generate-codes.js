@@ -3,8 +3,8 @@ import { randomBytes } from "node:crypto";
 const GROUPS = [
   { prefix: "AE-PM", plan: "PERSONAL_MONTHLY", mode: "consumer", duration_days: 30, count: 20 },
   { prefix: "AE-PY", plan: "PERSONAL_YEARLY", mode: "consumer", duration_days: 365, count: 20 },
-  { prefix: "AE-EM", plan: "ENTERPRISE_MONTHLY", mode: "team", duration_days: 30, count: 20 },
-  { prefix: "AE-EY", plan: "ENTERPRISE_YEARLY", mode: "team", duration_days: 365, count: 20 }
+  { prefix: "AE-EM", plan: "ENTERPRISE_MONTHLY", mode: "enterprise", duration_days: 30, count: 20 },
+  { prefix: "AE-EY", plan: "ENTERPRISE_YEARLY", mode: "enterprise", duration_days: 365, count: 20 }
 ];
 
 function token(bytes = 6) {
