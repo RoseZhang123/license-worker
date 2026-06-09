@@ -1,4 +1,4 @@
-name = "applyease-license-api"
+name = "license-worker"
 main = "src/worker.js"
 compatibility_date = "2026-05-30"
 

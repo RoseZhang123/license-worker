@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.js",
-    "generate:codes": "node scripts/generate-codes.js"
+    "generate:codes": "node scripts/generate-codes.js",
+    "codes:generate-paid": "node scripts/generate-paid-codes.js",
+    "codes:issue": "node scripts/issue-unused-code.js"
   }
 }
-

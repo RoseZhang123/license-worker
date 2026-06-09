@@ -6,7 +6,7 @@ Minimal production license API for one-time activation codes.
 
 The Chrome extension's bundled activation codes are for internal testing only.
 Before public paid launch, paid codes should be checked by this backend so that
-each code can be redeemed once, tied to a local device ID, and verified later.
+each code can be redeemed once, tied to the purchase email, and verified later.
 
 The API stores only license and support metadata. It must not receive student
 application profiles.
@@ -20,7 +20,7 @@ Request:
 ```json
 {
   "code": "AE-PY-XXXX-XXXX",
-  "device_id": "local-device-id",
+  "email": "buyer@example.com",
   "extension_version": "0.1.0"
 }
 ```
@@ -34,6 +34,7 @@ Success:
     "license_id": "lic_xxx",
     "mode": "consumer",
     "plan": "PERSONAL_YEARLY",
+    "buyer_email": "buyer@example.com",
     "activated_at": "2026-05-30T00:00:00.000Z",
     "expires_at": "2027-05-30T00:00:00.000Z",
     "status": "active"
@@ -48,7 +49,7 @@ Request:
 ```json
 {
   "license_id": "lic_xxx",
-  "device_id": "local-device-id"
+  "email": "buyer@example.com"
 }
 ```
 
@@ -64,7 +65,7 @@ Request:
 {
   "license_id": "lic_xxx",
   "code": "AE-PY-RENEW-XXXX",
-  "device_id": "local-device-id"
+  "email": "buyer@example.com"
 }
 ```
 
@@ -78,6 +79,7 @@ Success:
     "license_id": "lic_xxx",
     "mode": "consumer",
     "plan": "PERSONAL_YEARLY",
+    "buyer_email": "buyer@example.com",
     "activated_at": "2026-05-30T00:00:00.000Z",
     "expires_at": "2028-05-30T00:00:00.000Z",
     "status": "active"
@@ -138,11 +140,17 @@ testing.
 1. Create a D1 database in Cloudflare.
 2. Copy `wrangler.toml.example` to `wrangler.toml`.
 3. Fill in the D1 `database_id`.
-4. Apply schema:
+4. Apply schema (this is the single canonical bootstrap — `schema.sql` is the full
+   current schema with `IF NOT EXISTS`, safe to re-run):
 
 ```bash
 wrangler d1 execute applyease-license --file ./schema.sql --remote
 ```
+
+> ⚠️ Do NOT run `wrangler d1 migrations apply`. There is no migrations chain — `schema.sql`
+> is the source of truth. (Earlier `migrations/0002,0003` were removed: they conflicted with
+> schema.sql and broke fresh deploys. To upgrade a pre-existing old DB that is missing a column,
+> apply the specific `ALTER TABLE ... ADD COLUMN` by hand, not via migrations apply.)
 
 5. Generate testing codes:
 
@@ -154,6 +162,48 @@ wrangler d1 execute applyease-license --file ./seed-codes.sql --remote
 The database stores normalized codes without spaces or hyphens. The seed script
 keeps the hyphenated display code in the `note` column for manual sending and
 support lookup.
+
+## Manual paid code operations
+
+These scripts live under `backend/license-worker/` and are not part of the
+Chrome extension package.
+
+Generate paid activation codes for a plan:
+
+```bash
+npm run codes:generate-paid -- --plan PERSONAL_YEARLY --count 20 --note "launch batch" > paid-codes.sql
+wrangler d1 execute applyease-license --file ./paid-codes.sql --remote
+```
+
+Generate one batch for every plan:
+
+```bash
+npm run codes:generate-paid -- --all --count 10 --note "launch batch" > paid-codes.sql
+wrangler d1 execute applyease-license --file ./paid-codes.sql --remote
+```
+
+After payment is confirmed, reserve one unused code for the buyer email and
+print the hyphenated code to send:
+
+```bash
+npm run codes:issue -- --plan PERSONAL_YEARLY --email buyer@example.com
+```
+
+Use `--dry-run` to inspect the SQL without touching D1:
+
+```bash
+npm run codes:issue -- --plan PERSONAL_YEARLY --email buyer@example.com --dry-run
+```
+
+`codes:issue` writes `buyer_email` and an issue note onto the selected unused
+activation code while leaving `status = 'unused'`. The worker then enforces
+that pre-assigned email during `/api/license/activate` and
+`/api/license/renew`. The code becomes `used` only when the customer actually
+redeems it.
+
+The license database does not require or store an order id. Purchase email is
+the activation and renewal binding key; extra support context can go into
+`note` when needed.
 
 6. Optional: enable feedback email notifications.
 
@@ -171,9 +221,9 @@ wrangler deploy
 
 - Real paid activation codes must not be bundled into the extension.
 - `b` / `c` development shortcuts should stay development-only.
-- The API currently allows same-device activation retry to return the existing
-  active license. A different `device_id` receives `CODE_ALREADY_USED`.
+- The API currently allows same-email activation retry to return the existing
+  active license. A different purchase email receives `CODE_ALREADY_USED`.
 - Renewal uses a new unused activation code and updates the existing license
   instead of creating a second license.
-- If a user changes device, support can manually reset `device_id` or revoke and
-  reissue a license after confirming the order.
+- If a buyer used the wrong purchase email, support can correct `buyer_email` or
+  revoke and reissue a license after confirming the order.

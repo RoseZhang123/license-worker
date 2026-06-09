@@ -6,8 +6,8 @@ CREATE TABLE IF NOT EXISTS activation_codes (
   created_at TEXT NOT NULL,
   used_at TEXT,
   license_id TEXT,
+  buyer_email TEXT,
   device_id TEXT,
-  order_id TEXT,
   note TEXT
 );
 
@@ -26,13 +26,15 @@ CREATE TABLE IF NOT EXISTS licenses (
   mode TEXT NOT NULL,
   activated_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
-  device_id TEXT NOT NULL,
+  buyer_email TEXT NOT NULL,
+  device_id TEXT,
   status TEXT NOT NULL CHECK (status IN ('active', 'expired', 'revoked')),
   FOREIGN KEY (code) REFERENCES activation_codes(code)
 );
 
 CREATE INDEX IF NOT EXISTS idx_activation_codes_status ON activation_codes(status);
-CREATE INDEX IF NOT EXISTS idx_licenses_device_id ON licenses(device_id);
+CREATE INDEX IF NOT EXISTS idx_activation_codes_buyer_email ON activation_codes(buyer_email);
+CREATE INDEX IF NOT EXISTS idx_licenses_buyer_email ON licenses(buyer_email);
 CREATE INDEX IF NOT EXISTS idx_licenses_expires_at ON licenses(expires_at);
 
 CREATE TRIGGER IF NOT EXISTS normalize_license_mode

@@ -12,7 +12,7 @@ const ERROR_STATUS = {
   LICENSE_NOT_FOUND: 404,
   LICENSE_REVOKED: 403,
   LICENSE_EXPIRED: 403,
-  DEVICE_MISMATCH: 403,
+  EMAIL_MISMATCH: 403,
   RATE_LIMITED: 429,
   SERVER_ERROR: 500
 };
@@ -44,8 +44,9 @@ function normalizeCode(raw) {
   return String(raw || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
-function normalizeDeviceId(raw) {
-  return String(raw || "").trim().slice(0, 120);
+function normalizeEmail(raw) {
+  const value = String(raw || "").trim().toLowerCase().slice(0, 160);
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value) ? value : "";
 }
 
 function normalizeFeedbackType(raw) {
@@ -123,6 +124,7 @@ function publicLicense(row) {
     license_id: row.license_id,
     mode: row.mode,
     plan: row.plan,
+    buyer_email: row.buyer_email || "",
     activated_at: row.activated_at,
     expires_at: row.expires_at,
     status: row.status
@@ -161,19 +163,19 @@ async function readJson(request) {
 
 async function findActivationCode(db, code) {
   return db.prepare(
-    "SELECT code, plan, mode, status, used_at, license_id, device_id FROM activation_codes WHERE code = ?"
+    "SELECT code, plan, mode, status, used_at, license_id, buyer_email, device_id FROM activation_codes WHERE code = ?"
   ).bind(code).first();
 }
 
 async function findLicense(db, licenseId) {
   return db.prepare(
-    "SELECT license_id, code, plan, mode, activated_at, expires_at, device_id, status FROM licenses WHERE license_id = ?"
+    "SELECT license_id, code, plan, mode, activated_at, expires_at, buyer_email, device_id, status FROM licenses WHERE license_id = ?"
   ).bind(licenseId).first();
 }
 
 async function findLicenseByCode(db, code) {
   return db.prepare(
-    "SELECT license_id, code, plan, mode, activated_at, expires_at, device_id, status FROM licenses WHERE code = ?"
+    "SELECT license_id, code, plan, mode, activated_at, expires_at, buyer_email, device_id, status FROM licenses WHERE code = ?"
   ).bind(code).first();
 }
 
@@ -181,19 +183,22 @@ async function activateLicense(request, env) {
   if (!checkRateLimit(request)) return errorResponse("RATE_LIMITED", env);
   const body = await readJson(request);
   const code = normalizeCode(body?.code);
-  const deviceId = normalizeDeviceId(body?.device_id);
+  const email = normalizeEmail(body?.email);
 
-  if (!code || !deviceId) return errorResponse("BAD_REQUEST", env);
+  if (!code || !email) return errorResponse("BAD_REQUEST", env);
 
   const activation = await findActivationCode(env.DB, code);
   if (!activation) return errorResponse("INVALID_CODE", env);
   if (activation.status === "revoked") return errorResponse("CODE_REVOKED", env);
+  if (activation.status !== "used" && activation.buyer_email && activation.buyer_email !== email) {
+    return errorResponse("EMAIL_MISMATCH", env);
+  }
 
   if (activation.status === "used") {
     const existing = activation.license_id
       ? await findLicense(env.DB, activation.license_id)
       : await findLicenseByCode(env.DB, code);
-    if (existing?.device_id === deviceId && existing.status === "active") {
+    if (existing?.buyer_email === email && existing.status === "active") {
       return json({ ok: true, license: publicLicense(existing), reused: true }, 200, env);
     }
     return errorResponse("CODE_ALREADY_USED", env);
@@ -204,15 +209,15 @@ async function activateLicense(request, env) {
   const licenseId = `lic_${crypto.randomUUID()}`;
 
   const update = await env.DB.prepare(
-    "UPDATE activation_codes SET status = 'used', used_at = ?, license_id = ?, device_id = ? WHERE code = ? AND status = 'unused'"
-  ).bind(activatedAt.toISOString(), licenseId, deviceId, code).run();
+    "UPDATE activation_codes SET status = 'used', used_at = ?, license_id = ?, buyer_email = ?, device_id = ? WHERE code = ? AND status = 'unused'"
+  ).bind(activatedAt.toISOString(), licenseId, email, "", code).run();
 
   if ((update.meta?.changes ?? 0) !== 1) {
     return errorResponse("CODE_ALREADY_USED", env);
   }
 
   await env.DB.prepare(
-    "INSERT INTO licenses (license_id, code, plan, mode, activated_at, expires_at, device_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')"
+    "INSERT INTO licenses (license_id, code, plan, mode, activated_at, expires_at, buyer_email, device_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')"
   ).bind(
     licenseId,
     code,
@@ -220,7 +225,8 @@ async function activateLicense(request, env) {
     activation.mode,
     activatedAt.toISOString(),
     expiresAt.toISOString(),
-    deviceId
+    email,
+    ""
   ).run();
 
   const license = await findLicense(env.DB, licenseId);
@@ -231,13 +237,13 @@ async function verifyLicense(request, env) {
   if (!checkRateLimit(request)) return errorResponse("RATE_LIMITED", env);
   const body = await readJson(request);
   const licenseId = String(body?.license_id || "").trim();
-  const deviceId = normalizeDeviceId(body?.device_id);
+  const email = normalizeEmail(body?.email);
 
-  if (!licenseId || !deviceId) return errorResponse("BAD_REQUEST", env);
+  if (!licenseId || !email) return errorResponse("BAD_REQUEST", env);
 
   const license = await findLicense(env.DB, licenseId);
   if (!license) return errorResponse("LICENSE_NOT_FOUND", env);
-  if (license.device_id !== deviceId) return errorResponse("DEVICE_MISMATCH", env);
+  if (license.buyer_email !== email) return errorResponse("EMAIL_MISMATCH", env);
   if (license.status === "revoked") return errorResponse("LICENSE_REVOKED", env);
 
   const now = new Date();
@@ -261,19 +267,20 @@ async function renewLicense(request, env) {
   const body = await readJson(request);
   const licenseId = String(body?.license_id || "").trim();
   const code = normalizeCode(body?.code);
-  const deviceId = normalizeDeviceId(body?.device_id);
+  const email = normalizeEmail(body?.email);
 
-  if (!licenseId || !code || !deviceId) return errorResponse("BAD_REQUEST", env);
+  if (!licenseId || !code || !email) return errorResponse("BAD_REQUEST", env);
 
   const license = await findLicense(env.DB, licenseId);
   if (!license) return errorResponse("LICENSE_NOT_FOUND", env);
-  if (license.device_id !== deviceId) return errorResponse("DEVICE_MISMATCH", env);
+  if (license.buyer_email !== email) return errorResponse("EMAIL_MISMATCH", env);
   if (license.status === "revoked") return errorResponse("LICENSE_REVOKED", env);
 
   const activation = await findActivationCode(env.DB, code);
   if (!activation) return errorResponse("INVALID_CODE", env);
   if (activation.status === "revoked") return errorResponse("CODE_REVOKED", env);
   if (activation.status === "used") return errorResponse("CODE_ALREADY_USED", env);
+  if (activation.buyer_email && activation.buyer_email !== email) return errorResponse("EMAIL_MISMATCH", env);
   if (activation.mode !== license.mode) return errorResponse("BAD_REQUEST", env);
 
   const now = new Date();
@@ -282,8 +289,8 @@ async function renewLicense(request, env) {
   const nextExpiry = addPlanPeriod(baseDate, activation.plan);
 
   const update = await env.DB.prepare(
-    "UPDATE activation_codes SET status = 'used', used_at = ?, license_id = ?, device_id = ? WHERE code = ? AND status = 'unused'"
-  ).bind(now.toISOString(), licenseId, deviceId, code).run();
+    "UPDATE activation_codes SET status = 'used', used_at = ?, license_id = ?, buyer_email = ?, device_id = ? WHERE code = ? AND status = 'unused'"
+  ).bind(now.toISOString(), licenseId, email, "", code).run();
 
   if ((update.meta?.changes ?? 0) !== 1) {
     return errorResponse("CODE_ALREADY_USED", env);
@@ -399,7 +406,7 @@ export const __TEST_HOOKS__ = {
   addCalendarMonths,
   addPlanPeriod,
   normalizeCode,
-  normalizeDeviceId,
+  normalizeEmail,
   publicLicense,
   route
 };

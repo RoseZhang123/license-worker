@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import worker, { __TEST_HOOKS__ } from "../src/worker.js";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const WORKER_ROOT = join(HERE, "..");
+const SEED_SQL_PATH = join(WORKER_ROOT, "seed-codes.sql");
 
 class FakeStatement {
   constructor(db, sql) {
@@ -33,19 +41,20 @@ class FakeStatement {
   async run() {
     const sql = this.sql;
     if (sql.startsWith("UPDATE activation_codes SET status = 'used'")) {
-      const [usedAt, licenseId, deviceId, code] = this.values;
+      const [usedAt, licenseId, buyerEmail, deviceId, code] = this.values;
       const row = this.db.activationCodes.get(code);
       if (!row || row.status !== "unused") return { meta: { changes: 0 } };
       Object.assign(row, {
         status: "used",
         used_at: usedAt,
         license_id: licenseId,
+        buyer_email: buyerEmail,
         device_id: deviceId
       });
       return { meta: { changes: 1 } };
     }
     if (sql.startsWith("INSERT INTO licenses")) {
-      const [licenseId, code, plan, mode, activatedAt, expiresAt, deviceId] = this.values;
+      const [licenseId, code, plan, mode, activatedAt, expiresAt, buyerEmail, deviceId] = this.values;
       this.db.licenses.set(licenseId, {
         license_id: licenseId,
         code,
@@ -53,6 +62,7 @@ class FakeStatement {
         mode,
         activated_at: activatedAt,
         expires_at: expiresAt,
+        buyer_email: buyerEmail,
         device_id: deviceId,
         status: "active"
       });
@@ -96,6 +106,7 @@ class FakeD1 {
       created_at: "2026-05-30T00:00:00.000Z",
       used_at: null,
       license_id: null,
+      buyer_email: null,
       device_id: null,
       ...overrides
     });
@@ -140,8 +151,62 @@ async function readJson(response) {
   return response.json();
 }
 
+function splitSqlValues(valuesSql) {
+  return valuesSql
+    .split(/,(?=(?:[^']*'[^']*')*[^']*$)/)
+    .map((value) => value.trim());
+}
+
+function assertActivationSeedSqlMatchesSchema(seedSql, label) {
+  const schema = readFileSync(join(WORKER_ROOT, "schema.sql"), "utf8");
+  const insert = seedSql.match(/INSERT INTO activation_codes \(([^)]+)\) VALUES\s*([\s\S]*);/);
+  assert.ok(insert, `${label} 必须包含 activation_codes INSERT`);
+  const schemaColumnSection = schema.match(/CREATE TABLE IF NOT EXISTS activation_codes \(([\s\S]*?)\);/);
+  assert.ok(schemaColumnSection, "schema.sql 必须包含 activation_codes table");
+
+  const schemaColumns = new Set();
+  for (const line of schemaColumnSection[1].split("\n")) {
+    const column = line.trim().match(/^([a-z_]+)/i)?.[1];
+    if (column) schemaColumns.add(column);
+  }
+
+  const seedColumns = insert[1].split(",").map((column) => column.trim());
+  assert.doesNotMatch(insert[1], /\bduration_days\b/,
+    `${label} 不能再插入已从 schema 删除的 duration_days`);
+  for (const column of seedColumns) {
+    assert.ok(schemaColumns.has(column), `${label} 插入了 schema 不存在的列：${column}`);
+  }
+
+  const rows = insert[2].trim().split(/\),\s*\n\s*\(/);
+  assert.ok(rows.length >= 80, `${label} 应包含 80 个 internal testing codes`);
+  for (const row of rows) {
+    const cleaned = row.replace(/^\(/, "").replace(/\),?$/, "");
+    assert.equal(splitSqlValues(cleaned).length, seedColumns.length,
+      `${label} 行字段数与列数不一致：${row.slice(0, 80)}`);
+  }
+}
+
+test("generate-codes.js emits activation_codes SQL matching schema columns", () => {
+  const generated = execFileSync("node", ["scripts/generate-codes.js"], {
+    cwd: WORKER_ROOT,
+    encoding: "utf8"
+  });
+  assertActivationSeedSqlMatchesSchema(generated, "generate-codes.js output");
+});
+
+test("local seed-codes.sql matches activation_codes schema columns", {
+  skip: existsSync(SEED_SQL_PATH) ? false : "seed-codes.sql is locally generated and gitignored"
+}, () => {
+  assertActivationSeedSqlMatchesSchema(readFileSync(SEED_SQL_PATH, "utf8"), "seed-codes.sql");
+});
+
 test("normalizeCode removes spaces and hyphens", () => {
   assert.equal(__TEST_HOOKS__.normalizeCode(" ae-py-abcd-1234 "), "AEPYABCD1234");
+});
+
+test("normalizeEmail lowercases valid purchase email and rejects invalid values", () => {
+  assert.equal(__TEST_HOOKS__.normalizeEmail(" Student@Example.COM "), "student@example.com");
+  assert.equal(__TEST_HOOKS__.normalizeEmail("not-an-email"), "");
 });
 
 test("plan period uses calendar month and calendar year", () => {
@@ -158,7 +223,7 @@ test("plan period uses calendar month and calendar year", () => {
   );
 });
 
-test("activate redeems an unused code and creates a license", async () => {
+test("activate redeems an unused code and creates an email-bound license", async () => {
   const db = new FakeD1();
   db.addCode("AEPYABCD1234", {
     plan: "PERSONAL_YEARLY"
@@ -166,7 +231,7 @@ test("activate redeems an unused code and creates a license", async () => {
 
   const response = await worker.fetch(post("/api/license/activate", {
     code: "AE-PY-ABCD-1234",
-    device_id: "device-a"
+    email: "Student@Example.com"
   }), env(db));
   const body = await readJson(response);
 
@@ -174,26 +239,27 @@ test("activate redeems an unused code and creates a license", async () => {
   assert.equal(body.ok, true);
   assert.equal(body.license.plan, "PERSONAL_YEARLY");
   assert.equal(body.license.mode, "consumer");
+  assert.equal(body.license.buyer_email, "student@example.com");
   assert.equal(db.activationCodes.get("AEPYABCD1234").status, "used");
-  assert.equal(db.activationCodes.get("AEPYABCD1234").device_id, "device-a");
+  assert.equal(db.activationCodes.get("AEPYABCD1234").buyer_email, "student@example.com");
   assert.equal(db.licenses.size, 1);
 });
 
-test("activate is idempotent for the same device but blocked for another device", async () => {
+test("activate is idempotent for the same email but blocked for another email", async () => {
   const db = new FakeD1();
   db.addCode("AEPMCODE0001");
 
   const first = await readJson(await worker.fetch(post("/api/license/activate", {
     code: "AEPMCODE0001",
-    device_id: "device-a"
+    email: "student@example.com"
   }, "10.0.0.1"), env(db)));
   const second = await readJson(await worker.fetch(post("/api/license/activate", {
     code: "AEPMCODE0001",
-    device_id: "device-a"
+    email: "STUDENT@example.com"
   }, "10.0.0.2"), env(db)));
   const thirdResponse = await worker.fetch(post("/api/license/activate", {
     code: "AEPMCODE0001",
-    device_id: "device-b"
+    email: "other@example.com"
   }, "10.0.0.3"), env(db));
   const third = await readJson(thirdResponse);
 
@@ -205,27 +271,51 @@ test("activate is idempotent for the same device but blocked for another device"
   assert.equal(db.licenses.size, 1);
 });
 
-test("verify accepts matching active license and rejects mismatched device", async () => {
+test("activate enforces pre-assigned purchase email on unused codes", async () => {
+  const db = new FakeD1();
+  db.addCode("AEPYASSIGNED01", {
+    plan: "PERSONAL_YEARLY",
+    buyer_email: "buyer@example.com"
+  });
+
+  const wrongResponse = await worker.fetch(post("/api/license/activate", {
+    code: "AE-PY-ASSIGNED-01",
+    email: "other@example.com"
+  }), env(db));
+  const rightResponse = await worker.fetch(post("/api/license/activate", {
+    code: "AE-PY-ASSIGNED-01",
+    email: "BUYER@example.com"
+  }), env(db));
+  const right = await readJson(rightResponse);
+
+  assert.equal(wrongResponse.status, 403);
+  assert.equal((await readJson(wrongResponse)).error, "EMAIL_MISMATCH");
+  assert.equal(rightResponse.status, 200);
+  assert.equal(right.ok, true);
+  assert.equal(right.license.buyer_email, "buyer@example.com");
+});
+
+test("verify accepts matching active license and rejects mismatched email", async () => {
   const db = new FakeD1();
   db.addCode("AEPMVERIFY01");
   const activated = await readJson(await worker.fetch(post("/api/license/activate", {
     code: "AEPMVERIFY01",
-    device_id: "device-a"
+    email: "student@example.com"
   }), env(db)));
 
   const okResponse = await worker.fetch(post("/api/license/verify", {
     license_id: activated.license.license_id,
-    device_id: "device-a"
+    email: "student@example.com"
   }), env(db));
   const badResponse = await worker.fetch(post("/api/license/verify", {
     license_id: activated.license.license_id,
-    device_id: "device-b"
+    email: "other@example.com"
   }), env(db));
 
   assert.equal(okResponse.status, 200);
   assert.equal((await readJson(okResponse)).ok, true);
   assert.equal(badResponse.status, 403);
-  assert.equal((await readJson(badResponse)).error, "DEVICE_MISMATCH");
+  assert.equal((await readJson(badResponse)).error, "EMAIL_MISMATCH");
 });
 
 test("verify marks expired licenses as expired", async () => {
@@ -237,13 +327,14 @@ test("verify marks expired licenses as expired", async () => {
     mode: "consumer",
     activated_at: "2020-01-01T00:00:00.000Z",
     expires_at: "2020-02-01T00:00:00.000Z",
+    buyer_email: "student@example.com",
     device_id: "device-a",
     status: "active"
   });
 
   const response = await worker.fetch(post("/api/license/verify", {
     license_id: "lic_expired",
-    device_id: "device-a"
+    email: "student@example.com"
   }), env(db));
   const body = await readJson(response);
 
@@ -261,6 +352,7 @@ test("renew extends an active license from its current expiry", async () => {
     mode: "consumer",
     activated_at: "2026-01-01T00:00:00.000Z",
     expires_at: "2999-01-01T00:00:00.000Z",
+    buyer_email: "student@example.com",
     device_id: "device-a",
     status: "active"
   });
@@ -272,7 +364,7 @@ test("renew extends an active license from its current expiry", async () => {
   const response = await worker.fetch(post("/api/license/renew", {
     license_id: "lic_active",
     code: "AE-PY-RENEW-001",
-    device_id: "device-a"
+    email: "student@example.com"
   }), env(db));
   const body = await readJson(response);
 
@@ -284,6 +376,7 @@ test("renew extends an active license from its current expiry", async () => {
   assert.equal(body.license.expires_at, "3000-01-01T00:00:00.000Z");
   assert.equal(db.activationCodes.get("AEPYRENEW001").status, "used");
   assert.equal(db.activationCodes.get("AEPYRENEW001").license_id, "lic_active");
+  assert.equal(db.activationCodes.get("AEPYRENEW001").buyer_email, "student@example.com");
 });
 
 test("renew reactivates an expired license from now", async () => {
@@ -295,6 +388,7 @@ test("renew reactivates an expired license from now", async () => {
     mode: "consumer",
     activated_at: "2020-01-01T00:00:00.000Z",
     expires_at: "2020-02-01T00:00:00.000Z",
+    buyer_email: "student@example.com",
     device_id: "device-a",
     status: "expired"
   });
@@ -307,7 +401,7 @@ test("renew reactivates an expired license from now", async () => {
   const response = await worker.fetch(post("/api/license/renew", {
     license_id: "lic_old",
     code: "AE-PM-RENEW-002",
-    device_id: "device-a"
+    email: "student@example.com"
   }), env(db));
   const after = Date.now();
   const body = await readJson(response);
@@ -320,7 +414,7 @@ test("renew reactivates an expired license from now", async () => {
   assert.ok(expiresAt <= after + 31 * 24 * 60 * 60 * 1000);
 });
 
-test("renew rejects mismatched device and cross-mode renewal code", async () => {
+test("renew rejects mismatched email and cross-mode renewal code", async () => {
   const db = new FakeD1();
   db.licenses.set("lic_enterprise", {
     license_id: "lic_enterprise",
@@ -329,6 +423,7 @@ test("renew rejects mismatched device and cross-mode renewal code", async () => 
     mode: "enterprise",
     activated_at: "2026-01-01T00:00:00.000Z",
     expires_at: "2999-01-01T00:00:00.000Z",
+    buyer_email: "buyer@example.com",
     device_id: "device-a",
     status: "active"
   });
@@ -337,22 +432,52 @@ test("renew rejects mismatched device and cross-mode renewal code", async () => 
     mode: "consumer"
   });
 
-  const deviceResponse = await worker.fetch(post("/api/license/renew", {
+  const emailResponse = await worker.fetch(post("/api/license/renew", {
     license_id: "lic_enterprise",
     code: "AE-PM-BADMODE-01",
-    device_id: "device-b"
+    email: "other@example.com"
   }), env(db));
   const modeResponse = await worker.fetch(post("/api/license/renew", {
     license_id: "lic_enterprise",
     code: "AE-PM-BADMODE-01",
-    device_id: "device-a"
+    email: "buyer@example.com"
   }), env(db));
 
-  assert.equal(deviceResponse.status, 403);
-  assert.equal((await readJson(deviceResponse)).error, "DEVICE_MISMATCH");
+  assert.equal(emailResponse.status, 403);
+  assert.equal((await readJson(emailResponse)).error, "EMAIL_MISMATCH");
   assert.equal(modeResponse.status, 400);
   assert.equal((await readJson(modeResponse)).error, "BAD_REQUEST");
   assert.equal(db.activationCodes.get("AEPMBADMODE01").status, "unused");
+});
+
+test("renew enforces pre-assigned purchase email on renewal codes", async () => {
+  const db = new FakeD1();
+  db.licenses.set("lic_consumer", {
+    license_id: "lic_consumer",
+    code: "ORIGINAL",
+    plan: "PERSONAL_MONTHLY",
+    mode: "consumer",
+    activated_at: "2026-01-01T00:00:00.000Z",
+    expires_at: "2999-01-01T00:00:00.000Z",
+    buyer_email: "buyer@example.com",
+    device_id: "",
+    status: "active"
+  });
+  db.addCode("AEPYRENEWBUYER", {
+    plan: "PERSONAL_YEARLY",
+    mode: "consumer",
+    buyer_email: "another@example.com"
+  });
+
+  const response = await worker.fetch(post("/api/license/renew", {
+    license_id: "lic_consumer",
+    code: "AE-PY-RENEW-BUYER",
+    email: "buyer@example.com"
+  }), env(db));
+
+  assert.equal(response.status, 403);
+  assert.equal((await readJson(response)).error, "EMAIL_MISMATCH");
+  assert.equal(db.activationCodes.get("AEPYRENEWBUYER").status, "unused");
 });
 
 test("feedback endpoint validates payload and sends support email when configured", async () => {
