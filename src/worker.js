@@ -440,9 +440,12 @@ async function getConfig(request, env) {
 
   const etag = etagKV || "no-etag";
   const schemaVersion = schemaVersionKV ? Number(schemaVersionKV) : 1;
-  const ifNoneMatch = request.headers.get("if-none-match");
+  // ETag normalize: strip 双引号(HTTP 常见 "hash" vs hash;Codex review #2 NEEDS WORK ③)
+  const normalizeEtag = (s) => String(s || "").replace(/^"|"$/g, "");
+  const ifNoneMatch = normalizeEtag(request.headers.get("if-none-match"));
+  const etagNormalized = normalizeEtag(etag);
 
-  if (ifNoneMatch && ifNoneMatch === etag) {
+  if (ifNoneMatch && ifNoneMatch === etagNormalized) {
     return new Response(null, {
       status: 304,
       headers: {
@@ -453,7 +456,29 @@ async function getConfig(request, env) {
     });
   }
 
-  return new Response(bundleStr, {
+  // ⭐ Codex review #2 BLOCK ⑤ 修 + 嵌套 bug 二次修(2026-06-20):
+  // KV 里 `bundle` key 存的是 build-config-bundle.mjs 完整 output,**已经是** wrapper format
+  // `{schemaVersion, configVersion, bundle:{<school>:{<file>:...}}, fileCount, generatedAtPlaceholder}`。
+  // 客户端 config-delivery.js:162 期望 `data.bundle` / `data.schemaVersion` — 直接对应 outer 的字段。
+  // 所以 worker 只需 parse + validate + 返 parsed JSON,**不要再包一层**(我之前包了 outer.bundle = parsed 导致嵌套)。
+  let parsed;
+  try {
+    parsed = JSON.parse(bundleStr);
+  } catch (e) {
+    return new Response(JSON.stringify({ status: "unavailable", reason: "kv_corrupt" }), {
+      status: 503,
+      headers: { ...JSON_HEADERS, ...corsHeaders(env) }
+    });
+  }
+  // 确保返回的 wrapper 含客户端必需的 `bundle` + `schemaVersion`(防 build script 改 schema 时静默坏)
+  if (!parsed.bundle || typeof parsed.schemaVersion !== "number") {
+    return new Response(JSON.stringify({ status: "unavailable", reason: "kv_corrupt_shape" }), {
+      status: 503,
+      headers: { ...JSON_HEADERS, ...corsHeaders(env) }
+    });
+  }
+
+  return new Response(JSON.stringify(parsed), {
     status: 200,
     headers: {
       ...JSON_HEADERS,
