@@ -190,8 +190,10 @@ async function activateLicense(request, env) {
   const activation = await findActivationCode(env.DB, code);
   if (!activation) return errorResponse("INVALID_CODE", env);
   if (activation.status === "revoked") return errorResponse("CODE_REVOKED", env);
-  if (activation.status !== "used" && activation.buyer_email && activation.buyer_email !== email) {
-    return errorResponse("EMAIL_MISMATCH", env);
+  if (activation.status !== "used") {
+    if (!activation.buyer_email || activation.buyer_email !== email) {
+      return errorResponse("EMAIL_MISMATCH", env);
+    }
   }
 
   if (activation.status === "used") {
