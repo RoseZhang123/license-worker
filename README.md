@@ -168,26 +168,19 @@ support lookup.
 These scripts live under `backend/license-worker/` and are not part of the
 Chrome extension package.
 
-Generate paid activation codes for a plan:
-
-```bash
-npm run codes:generate-paid -- --plan PERSONAL_YEARLY --count 20 --note "launch batch" > paid-codes.sql
-wrangler d1 execute applyease-license --file ./paid-codes.sql --remote
-```
-
-Generate one batch for every plan:
-
-```bash
-npm run codes:generate-paid -- --all --count 10 --note "launch batch" > paid-codes.sql
-wrangler d1 execute applyease-license --file ./paid-codes.sql --remote
-```
-
-After payment is confirmed, reserve one unused code for the buyer email and
-print the hyphenated code to send:
+After payment is confirmed, issue one code for the buyer email and print the
+hyphenated code to send:
 
 ```bash
 npm run codes:issue -- --plan PERSONAL_YEARLY --email buyer@example.com
 ```
+
+`codes:issue` first returns an unused code already bound to the same email and
+plan, so rerunning the command is safe. If none exists, it reserves the oldest
+unused, unassigned code for that plan. If no matching stock code exists, it
+creates a new unused code. In every case it binds `buyer_email` immediately, so
+`/api/license/activate` only succeeds when the customer enters the same purchase
+email.
 
 Use `--dry-run` to inspect the SQL without touching D1:
 
@@ -195,11 +188,12 @@ Use `--dry-run` to inspect the SQL without touching D1:
 npm run codes:issue -- --plan PERSONAL_YEARLY --email buyer@example.com --dry-run
 ```
 
-`codes:issue` writes `buyer_email` and an issue note onto the selected unused
-activation code while leaving `status = 'unused'`. The worker then enforces
-that pre-assigned email during `/api/license/activate` and
-`/api/license/renew`. The code becomes `used` only when the customer actually
-redeems it.
+To pre-generate stock manually instead, use `codes:generate-paid`, then execute
+the emitted SQL with Wrangler. This is optional; `codes:issue` can create a new
+code when stock is empty.
+
+The code remains `status = 'unused'` after issue. It becomes `used` only when
+the customer actually redeems it.
 
 The license database does not require or store an order id. Purchase email is
 the activation and renewal binding key; extra support context can go into

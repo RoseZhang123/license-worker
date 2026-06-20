@@ -200,6 +200,25 @@ test("local seed-codes.sql matches activation_codes schema columns", {
   assertActivationSeedSqlMatchesSchema(readFileSync(SEED_SQL_PATH, "utf8"), "seed-codes.sql");
 });
 
+test("issue-unused-code dry-run reserves existing code or creates a bound replacement", () => {
+  const output = execFileSync("node", [
+    "scripts/issue-unused-code.js",
+    "--plan", "PERSONAL_YEARLY",
+    "--email", "Buyer@Example.com",
+    "--dry-run"
+  ], {
+    cwd: WORKER_ROOT,
+    encoding: "utf8"
+  });
+
+  assert.match(output, /UPDATE activation_codes[\s\S]*buyer_email = 'buyer@example\.com'/,
+    "script should first reserve an unused unassigned stock code for the purchase email");
+  assert.match(output, /INSERT INTO activation_codes \(code, plan, mode, status, created_at, buyer_email, note\)/,
+    "script should create a new bound code when no unused stock code is available");
+  assert.match(output, /'PERSONAL_YEARLY'/);
+  assert.match(output, /'consumer'/);
+});
+
 test("normalizeCode removes spaces and hyphens", () => {
   assert.equal(__TEST_HOOKS__.normalizeCode(" ae-py-abcd-1234 "), "AEPYABCD1234");
 });
@@ -226,7 +245,8 @@ test("plan period uses calendar month and calendar year", () => {
 test("activate redeems an unused code and creates an email-bound license", async () => {
   const db = new FakeD1();
   db.addCode("AEPYABCD1234", {
-    plan: "PERSONAL_YEARLY"
+    plan: "PERSONAL_YEARLY",
+    buyer_email: "student@example.com"
   });
 
   const response = await worker.fetch(post("/api/license/activate", {
@@ -247,7 +267,7 @@ test("activate redeems an unused code and creates an email-bound license", async
 
 test("activate is idempotent for the same email but blocked for another email", async () => {
   const db = new FakeD1();
-  db.addCode("AEPMCODE0001");
+  db.addCode("AEPMCODE0001", { buyer_email: "student@example.com" });
 
   const first = await readJson(await worker.fetch(post("/api/license/activate", {
     code: "AEPMCODE0001",
@@ -269,6 +289,22 @@ test("activate is idempotent for the same email but blocked for another email", 
   assert.equal(thirdResponse.status, 409);
   assert.equal(third.error, "CODE_ALREADY_USED");
   assert.equal(db.licenses.size, 1);
+});
+
+test("activate rejects unused codes that were not pre-bound to a purchase email", async () => {
+  const db = new FakeD1();
+  db.addCode("AEPMUNBOUND1");
+
+  const response = await worker.fetch(post("/api/license/activate", {
+    code: "AE-PM-UNBOUND-1",
+    email: "student@example.com"
+  }), env(db));
+  const body = await readJson(response);
+
+  assert.equal(response.status, 403);
+  assert.equal(body.error, "EMAIL_MISMATCH");
+  assert.equal(db.activationCodes.get("AEPMUNBOUND1").status, "unused");
+  assert.equal(db.licenses.size, 0);
 });
 
 test("activate enforces pre-assigned purchase email on unused codes", async () => {
@@ -297,7 +333,7 @@ test("activate enforces pre-assigned purchase email on unused codes", async () =
 
 test("verify accepts matching active license and rejects mismatched email", async () => {
   const db = new FakeD1();
-  db.addCode("AEPMVERIFY01");
+  db.addCode("AEPMVERIFY01", { buyer_email: "student@example.com" });
   const activated = await readJson(await worker.fetch(post("/api/license/activate", {
     code: "AEPMVERIFY01",
     email: "student@example.com"
