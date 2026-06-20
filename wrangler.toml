@@ -16,3 +16,8 @@ FEEDBACK_FROM_EMAIL = "support@applyease.cn"
 binding = "DB"
 database_name = "applyease-license"
 database_id = "1ea2cd29-a816-4729-b0cc-d82340c01830"
+
+[[kv_namespaces]]
+binding = "CONFIG_KV"
+id = "c6e1397eb0f042759486e2d52c94a92c"
+preview_id = "8ee13f6882734c8c9ab9ac2949434cbf"

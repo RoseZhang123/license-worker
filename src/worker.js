@@ -27,8 +27,9 @@ function corsHeaders(env = {}) {
   const origin = env.ALLOWED_ORIGIN || "*";
   return {
     "access-control-allow-origin": origin,
-    "access-control-allow-methods": "POST, OPTIONS",
-    "access-control-allow-headers": "content-type",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-headers": "authorization, content-type, if-none-match, x-applyease-device-id",
+    "access-control-expose-headers": "etag, x-applyease-schema-version",
     "access-control-max-age": "86400"
   };
 }
@@ -382,14 +383,114 @@ async function route(request, env) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders(env) });
   }
-  if (request.method !== "POST") return errorResponse("METHOD_NOT_ALLOWED", env);
 
   const url = new URL(request.url);
+
+  // GET /api/config — 配置下发(轨7 step1-5,2026-06-20 真 deploy)
+  if (request.method === "GET" && url.pathname === "/api/config") {
+    return getConfig(request, env);
+  }
+
+  if (request.method !== "POST") return errorResponse("METHOD_NOT_ALLOWED", env);
+
   if (url.pathname === "/api/license/activate") return activateLicense(request, env);
   if (url.pathname === "/api/license/verify") return verifyLicense(request, env);
   if (url.pathname === "/api/license/renew") return renewLicense(request, env);
   if (url.pathname === "/api/feedback") return submitFeedback(request, env);
   return errorResponse("BAD_REQUEST", env);
+}
+
+// /api/config: 从 CONFIG_KV 读 bundle 并返回(支持 If-None-Match → 304)。
+// KV key 约定:
+//   - "bundle"          → 完整 bundle JSON 字符串
+//   - "etag"            → 内容指纹(configVersion sha256)
+//   - "schemaVersion"   → bundle 的 schemaVersion 数字
+async function getConfig(request, env) {
+  if (!env?.CONFIG_KV) {
+    return new Response(JSON.stringify({ status: "unavailable", reason: "kv_not_bound" }), {
+      status: 503,
+      headers: { ...JSON_HEADERS, ...corsHeaders(env) }
+    });
+  }
+
+  // ⭐ Authorization 检查是 prefix-only(产品决定,非 BUG,Codex review #2):
+  // 只检查 `ApplyEase ` 前缀,不严格 verify license_id in D1(本端点宽松)。理由:
+  //   ① bundle 内容是 mapping(非敏感,已 ship 在 extension 包内)
+  //   ② 真正的填表 gate 在 extension-side verifyStoredLicense(6h 节流 + Start Filling
+  //     前必 verify license_id 真实有效;PR #119 D1 batch 已 gate)
+  //   ③ 带宽/成本风险:未来如有滥用,可加 Cloudflare Worker rate limit
+  // 严格 license 校验流程见 verifyLicense();此端点不复用以避免每次配置拉取都打 D1。
+  const auth = request.headers.get("authorization") || "";
+  if (!auth.startsWith("ApplyEase ")) {
+    return new Response(JSON.stringify({ status: "unauthorized" }), {
+      status: 401,
+      headers: { ...JSON_HEADERS, ...corsHeaders(env) }
+    });
+  }
+
+  const [bundleStr, etagKV, schemaVersionKV] = await Promise.all([
+    env.CONFIG_KV.get("bundle"),
+    env.CONFIG_KV.get("etag"),
+    env.CONFIG_KV.get("schemaVersion")
+  ]);
+
+  if (!bundleStr) {
+    return new Response(JSON.stringify({ status: "unavailable", reason: "kv_empty" }), {
+      status: 503,
+      headers: { ...JSON_HEADERS, ...corsHeaders(env) }
+    });
+  }
+
+  const etag = etagKV || "no-etag";
+  const schemaVersion = schemaVersionKV ? Number(schemaVersionKV) : 1;
+  // ETag normalize: strip 双引号(HTTP 常见 "hash" vs hash;Codex review #2 NEEDS WORK ③)
+  const normalizeEtag = (s) => String(s || "").replace(/^"|"$/g, "");
+  const ifNoneMatch = normalizeEtag(request.headers.get("if-none-match"));
+  const etagNormalized = normalizeEtag(etag);
+
+  if (ifNoneMatch && ifNoneMatch === etagNormalized) {
+    return new Response(null, {
+      status: 304,
+      headers: {
+        ...corsHeaders(env),
+        "etag": etag,
+        "x-applyease-schema-version": String(schemaVersion)
+      }
+    });
+  }
+
+  // ⭐ Codex review #2 BLOCK ⑤ 修 + 嵌套 bug 二次修(2026-06-20):
+  // KV 里 `bundle` key 存的是 build-config-bundle.mjs 完整 output,**已经是** wrapper format
+  // `{schemaVersion, configVersion, bundle:{<school>:{<file>:...}}, fileCount, generatedAtPlaceholder}`。
+  // 客户端 config-delivery.js:162 期望 `data.bundle` / `data.schemaVersion` — 直接对应 outer 的字段。
+  // 所以 worker 只需 parse + validate + 返 parsed JSON,**不要再包一层**(我之前包了 outer.bundle = parsed 导致嵌套)。
+  let parsed;
+  try {
+    parsed = JSON.parse(bundleStr);
+  } catch (e) {
+    return new Response(JSON.stringify({ status: "unavailable", reason: "kv_corrupt" }), {
+      status: 503,
+      headers: { ...JSON_HEADERS, ...corsHeaders(env) }
+    });
+  }
+  // 确保返回的 wrapper 含客户端必需的 `bundle` + `schemaVersion`(防 build script 改 schema 时静默坏)
+  if (!parsed.bundle || typeof parsed.schemaVersion !== "number") {
+    return new Response(JSON.stringify({ status: "unavailable", reason: "kv_corrupt_shape" }), {
+      status: 503,
+      headers: { ...JSON_HEADERS, ...corsHeaders(env) }
+    });
+  }
+
+  return new Response(JSON.stringify(parsed), {
+    status: 200,
+    headers: {
+      ...JSON_HEADERS,
+      ...corsHeaders(env),
+      "etag": etag,
+      "x-applyease-schema-version": String(schemaVersion),
+      "cache-control": "no-cache"
+    }
+  });
 }
 
 export default {
