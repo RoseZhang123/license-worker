@@ -413,10 +413,13 @@ async function getConfig(request, env) {
     });
   }
 
-  // 简化版鉴权:要求 Authorization 头(license-worker 已 ship,客户端 config-delivery 会带)。
-  // 严格 license 校验(license_id 是否真实有效)用 verifyLicense 的同款流程;本端点宽松接受
-  // 任何 Authorization,因为:① bundle 内容是 mapping(非敏感)② 真正的填表 gate 在
-  // extension-side verifyStoredLicense(6h 节流 + Start Filling 前必 verify)。
+  // ⭐ Authorization 检查是 prefix-only(产品决定,非 BUG,Codex review #2):
+  // 只检查 `ApplyEase ` 前缀,不严格 verify license_id in D1(本端点宽松)。理由:
+  //   ① bundle 内容是 mapping(非敏感,已 ship 在 extension 包内)
+  //   ② 真正的填表 gate 在 extension-side verifyStoredLicense(6h 节流 + Start Filling
+  //     前必 verify license_id 真实有效;PR #119 D1 batch 已 gate)
+  //   ③ 带宽/成本风险:未来如有滥用,可加 Cloudflare Worker rate limit
+  // 严格 license 校验流程见 verifyLicense();此端点不复用以避免每次配置拉取都打 D1。
   const auth = request.headers.get("authorization") || "";
   if (!auth.startsWith("ApplyEase ")) {
     return new Response(JSON.stringify({ status: "unauthorized" }), {

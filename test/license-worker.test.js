@@ -549,6 +549,123 @@ test("feedback endpoint validates payload and sends support email when configure
   assert.match(sent[0].html, /applyease_diagnostic_report_v1/);
 });
 
+// /api/config endpoint tests (Codex review #2 NEEDS WORK: tests + Authorization 文档化)
+// 覆盖 200 wrapper + 304 If-None-Match(raw/quoted) + 401(no auth / wrong prefix)
+// + 503(kv_not_bound / kv_empty / kv_corrupt_shape)。
+function makeKV(map) {
+  return {
+    get: async (key) => (map[key] !== undefined ? map[key] : null)
+  };
+}
+
+function getConfigRequest(headers = {}) {
+  return new Request("https://license.applyease.test/api/config", {
+    method: "GET",
+    headers
+  });
+}
+
+function envWithConfigKV(kv, db = new FakeD1()) {
+  return { DB: db, ALLOWED_ORIGIN: "chrome-extension://test", CONFIG_KV: kv };
+}
+
+const VALID_AUTH = { authorization: "ApplyEase lic_test_123" };
+
+test("GET /api/config 200 returns wrapper shape with ETag header", async () => {
+  const bundlePayload = {
+    schemaVersion: 1,
+    configVersion: "abc",
+    bundle: { hku: { "hku_mapping.json": { pages: {} } } },
+    fileCount: 1
+  };
+  const kv = makeKV({
+    bundle: JSON.stringify(bundlePayload),
+    etag: "abc",
+    schemaVersion: "1"
+  });
+  const response = await worker.fetch(getConfigRequest(VALID_AUTH), envWithConfigKV(kv));
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("etag"), "abc");
+  assert.equal(response.headers.get("x-applyease-schema-version"), "1");
+  const body = await readJson(response);
+  assert.equal(body.schemaVersion, 1);
+  assert.equal(body.configVersion, "abc");
+  assert.equal(body.fileCount, 1);
+  assert.ok(body.bundle && body.bundle.hku, "wrapper 必须含 bundle.<school>");
+});
+
+test("GET /api/config 304 when If-None-Match matches etag", async () => {
+  const kv = makeKV({
+    bundle: JSON.stringify({ schemaVersion: 1, configVersion: "abc", bundle: { hku: {} }, fileCount: 1 }),
+    etag: "abc",
+    schemaVersion: "1"
+  });
+  const response = await worker.fetch(
+    getConfigRequest({ ...VALID_AUTH, "if-none-match": "abc" }),
+    envWithConfigKV(kv)
+  );
+  assert.equal(response.status, 304);
+  assert.equal(response.headers.get("etag"), "abc");
+});
+
+test("GET /api/config 304 normalizes quoted If-None-Match (\"abc\" matches abc)", async () => {
+  const kv = makeKV({
+    bundle: JSON.stringify({ schemaVersion: 1, configVersion: "abc", bundle: { hku: {} }, fileCount: 1 }),
+    etag: "abc",
+    schemaVersion: "1"
+  });
+  const response = await worker.fetch(
+    getConfigRequest({ ...VALID_AUTH, "if-none-match": '"abc"' }),
+    envWithConfigKV(kv)
+  );
+  assert.equal(response.status, 304);
+});
+
+test("GET /api/config 401 when Authorization header missing", async () => {
+  const kv = makeKV({ bundle: JSON.stringify({ schemaVersion: 1, bundle: {} }), etag: "abc", schemaVersion: "1" });
+  const response = await worker.fetch(getConfigRequest({}), envWithConfigKV(kv));
+  assert.equal(response.status, 401);
+  const body = await readJson(response);
+  assert.equal(body.status, "unauthorized");
+});
+
+test("GET /api/config 401 when Authorization uses wrong prefix (Bearer)", async () => {
+  const kv = makeKV({ bundle: JSON.stringify({ schemaVersion: 1, bundle: {} }), etag: "abc", schemaVersion: "1" });
+  const response = await worker.fetch(
+    getConfigRequest({ authorization: "Bearer lic_test_123" }),
+    envWithConfigKV(kv)
+  );
+  assert.equal(response.status, 401);
+});
+
+test("GET /api/config 503 kv_not_bound when env.CONFIG_KV is missing", async () => {
+  const response = await worker.fetch(getConfigRequest(VALID_AUTH), env(new FakeD1()));
+  assert.equal(response.status, 503);
+  const body = await readJson(response);
+  assert.equal(body.status, "unavailable");
+  assert.equal(body.reason, "kv_not_bound");
+});
+
+test("GET /api/config 503 kv_empty when bundle key is null", async () => {
+  const kv = makeKV({ bundle: null, etag: "abc", schemaVersion: "1" });
+  const response = await worker.fetch(getConfigRequest(VALID_AUTH), envWithConfigKV(kv));
+  assert.equal(response.status, 503);
+  const body = await readJson(response);
+  assert.equal(body.reason, "kv_empty");
+});
+
+test("GET /api/config 503 kv_corrupt_shape when bundle JSON missing 'bundle' field", async () => {
+  const kv = makeKV({
+    bundle: JSON.stringify({ schemaVersion: 1 }), // 缺 bundle 字段
+    etag: "abc",
+    schemaVersion: "1"
+  });
+  const response = await worker.fetch(getConfigRequest(VALID_AUTH), envWithConfigKV(kv));
+  assert.equal(response.status, 503);
+  const body = await readJson(response);
+  assert.equal(body.reason, "kv_corrupt_shape");
+});
+
 test("feedback endpoint rejects missing contact or too-short message", async () => {
   const badContact = await worker.fetch(post("/api/feedback", {
     type: "suggestion",
