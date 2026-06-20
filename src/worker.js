@@ -27,8 +27,9 @@ function corsHeaders(env = {}) {
   const origin = env.ALLOWED_ORIGIN || "*";
   return {
     "access-control-allow-origin": origin,
-    "access-control-allow-methods": "POST, OPTIONS",
-    "access-control-allow-headers": "content-type",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-headers": "authorization, content-type, if-none-match, x-applyease-device-id",
+    "access-control-expose-headers": "etag, x-applyease-schema-version",
     "access-control-max-age": "86400"
   };
 }
@@ -382,14 +383,86 @@ async function route(request, env) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders(env) });
   }
-  if (request.method !== "POST") return errorResponse("METHOD_NOT_ALLOWED", env);
 
   const url = new URL(request.url);
+
+  // GET /api/config — 配置下发(轨7 step1-5,2026-06-20 真 deploy)
+  if (request.method === "GET" && url.pathname === "/api/config") {
+    return getConfig(request, env);
+  }
+
+  if (request.method !== "POST") return errorResponse("METHOD_NOT_ALLOWED", env);
+
   if (url.pathname === "/api/license/activate") return activateLicense(request, env);
   if (url.pathname === "/api/license/verify") return verifyLicense(request, env);
   if (url.pathname === "/api/license/renew") return renewLicense(request, env);
   if (url.pathname === "/api/feedback") return submitFeedback(request, env);
   return errorResponse("BAD_REQUEST", env);
+}
+
+// /api/config: 从 CONFIG_KV 读 bundle 并返回(支持 If-None-Match → 304)。
+// KV key 约定:
+//   - "bundle"          → 完整 bundle JSON 字符串
+//   - "etag"            → 内容指纹(configVersion sha256)
+//   - "schemaVersion"   → bundle 的 schemaVersion 数字
+async function getConfig(request, env) {
+  if (!env?.CONFIG_KV) {
+    return new Response(JSON.stringify({ status: "unavailable", reason: "kv_not_bound" }), {
+      status: 503,
+      headers: { ...JSON_HEADERS, ...corsHeaders(env) }
+    });
+  }
+
+  // 简化版鉴权:要求 Authorization 头(license-worker 已 ship,客户端 config-delivery 会带)。
+  // 严格 license 校验(license_id 是否真实有效)用 verifyLicense 的同款流程;本端点宽松接受
+  // 任何 Authorization,因为:① bundle 内容是 mapping(非敏感)② 真正的填表 gate 在
+  // extension-side verifyStoredLicense(6h 节流 + Start Filling 前必 verify)。
+  const auth = request.headers.get("authorization") || "";
+  if (!auth.startsWith("ApplyEase ")) {
+    return new Response(JSON.stringify({ status: "unauthorized" }), {
+      status: 401,
+      headers: { ...JSON_HEADERS, ...corsHeaders(env) }
+    });
+  }
+
+  const [bundleStr, etagKV, schemaVersionKV] = await Promise.all([
+    env.CONFIG_KV.get("bundle"),
+    env.CONFIG_KV.get("etag"),
+    env.CONFIG_KV.get("schemaVersion")
+  ]);
+
+  if (!bundleStr) {
+    return new Response(JSON.stringify({ status: "unavailable", reason: "kv_empty" }), {
+      status: 503,
+      headers: { ...JSON_HEADERS, ...corsHeaders(env) }
+    });
+  }
+
+  const etag = etagKV || "no-etag";
+  const schemaVersion = schemaVersionKV ? Number(schemaVersionKV) : 1;
+  const ifNoneMatch = request.headers.get("if-none-match");
+
+  if (ifNoneMatch && ifNoneMatch === etag) {
+    return new Response(null, {
+      status: 304,
+      headers: {
+        ...corsHeaders(env),
+        "etag": etag,
+        "x-applyease-schema-version": String(schemaVersion)
+      }
+    });
+  }
+
+  return new Response(bundleStr, {
+    status: 200,
+    headers: {
+      ...JSON_HEADERS,
+      ...corsHeaders(env),
+      "etag": etag,
+      "x-applyease-schema-version": String(schemaVersion),
+      "cache-control": "no-cache"
+    }
+  });
 }
 
 export default {
