@@ -7,5 +7,8 @@
     "generate:codes": "node scripts/generate-codes.js",
     "codes:generate-paid": "node scripts/generate-paid-codes.js",
     "codes:issue": "node scripts/issue-unused-code.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.103.0"
   }
 }

@@ -9,6 +9,8 @@ import worker, { __TEST_HOOKS__ } from "../src/worker.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKER_ROOT = join(HERE, "..");
 const SEED_SQL_PATH = join(WORKER_ROOT, "seed-codes.sql");
+const DEVICE_A = "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const DEVICE_B = "dev_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 class FakeStatement {
   constructor(db, sql) {
@@ -137,13 +139,16 @@ function envWithEmail(db = new FakeD1()) {
 }
 
 function post(path, body, ip = "127.0.0.1") {
+  const payload = path.startsWith("/api/license/")
+    ? { device_id: DEVICE_A, ...body }
+    : body;
   return new Request(`https://license.applyease.test${path}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       "cf-connecting-ip": ip
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(payload)
   });
 }
 
@@ -228,6 +233,12 @@ test("normalizeEmail lowercases valid purchase email and rejects invalid values"
   assert.equal(__TEST_HOOKS__.normalizeEmail("not-an-email"), "");
 });
 
+test("normalizeDeviceId accepts extension device ids only", () => {
+  assert.equal(__TEST_HOOKS__.normalizeDeviceId(DEVICE_A), DEVICE_A);
+  assert.equal(__TEST_HOOKS__.normalizeDeviceId("device-a"), "");
+  assert.equal(__TEST_HOOKS__.normalizeDeviceId("dev_nothex"), "");
+});
+
 test("plan period uses calendar month and calendar year", () => {
   const jan31 = new Date("2026-01-31T12:00:00.000Z");
   const leapDay = new Date("2024-02-29T12:00:00.000Z");
@@ -262,10 +273,12 @@ test("activate redeems an unused code and creates an email-bound license", async
   assert.equal(body.license.buyer_email, "student@example.com");
   assert.equal(db.activationCodes.get("AEPYABCD1234").status, "used");
   assert.equal(db.activationCodes.get("AEPYABCD1234").buyer_email, "student@example.com");
+  assert.equal(db.activationCodes.get("AEPYABCD1234").device_id, DEVICE_A);
   assert.equal(db.licenses.size, 1);
+  assert.equal([...db.licenses.values()][0].device_id, DEVICE_A);
 });
 
-test("activate is idempotent for the same email but blocked for another email", async () => {
+test("activate is idempotent for the same email and device but blocks another device or email", async () => {
   const db = new FakeD1();
   db.addCode("AEPMCODE0001", { buyer_email: "student@example.com" });
 
@@ -277,6 +290,12 @@ test("activate is idempotent for the same email but blocked for another email", 
     code: "AEPMCODE0001",
     email: "STUDENT@example.com"
   }, "10.0.0.2"), env(db)));
+  const differentDeviceResponse = await worker.fetch(post("/api/license/activate", {
+    code: "AEPMCODE0001",
+    email: "student@example.com",
+    device_id: DEVICE_B
+  }, "10.0.0.4"), env(db));
+  const differentDevice = await readJson(differentDeviceResponse);
   const thirdResponse = await worker.fetch(post("/api/license/activate", {
     code: "AEPMCODE0001",
     email: "other@example.com"
@@ -286,6 +305,8 @@ test("activate is idempotent for the same email but blocked for another email", 
   assert.equal(first.ok, true);
   assert.equal(second.ok, true);
   assert.equal(second.reused, true);
+  assert.equal(differentDeviceResponse.status, 403);
+  assert.equal(differentDevice.error, "DEVICE_MISMATCH");
   assert.equal(thirdResponse.status, 409);
   assert.equal(third.error, "CODE_ALREADY_USED");
   assert.equal(db.licenses.size, 1);
@@ -304,6 +325,23 @@ test("activate rejects unused codes that were not pre-bound to a purchase email"
   assert.equal(response.status, 403);
   assert.equal(body.error, "EMAIL_MISMATCH");
   assert.equal(db.activationCodes.get("AEPMUNBOUND1").status, "unused");
+  assert.equal(db.licenses.size, 0);
+});
+
+test("activate rejects missing or invalid device ids", async () => {
+  const db = new FakeD1();
+  db.addCode("AEPMNODEVICE", { buyer_email: "student@example.com" });
+
+  const response = await worker.fetch(post("/api/license/activate", {
+    code: "AE-PM-NO-DEVICE",
+    email: "student@example.com",
+    device_id: ""
+  }), env(db));
+  const body = await readJson(response);
+
+  assert.equal(response.status, 400);
+  assert.equal(body.error, "BAD_REQUEST");
+  assert.equal(db.activationCodes.get("AEPMNODEVICE").status, "unused");
   assert.equal(db.licenses.size, 0);
 });
 
@@ -331,7 +369,7 @@ test("activate enforces pre-assigned purchase email on unused codes", async () =
   assert.equal(right.license.buyer_email, "buyer@example.com");
 });
 
-test("verify accepts matching active license and rejects mismatched email", async () => {
+test("verify accepts matching active license and rejects mismatched email or device", async () => {
   const db = new FakeD1();
   db.addCode("AEPMVERIFY01", { buyer_email: "student@example.com" });
   const activated = await readJson(await worker.fetch(post("/api/license/activate", {
@@ -347,11 +385,18 @@ test("verify accepts matching active license and rejects mismatched email", asyn
     license_id: activated.license.license_id,
     email: "other@example.com"
   }), env(db));
+  const deviceResponse = await worker.fetch(post("/api/license/verify", {
+    license_id: activated.license.license_id,
+    email: "student@example.com",
+    device_id: DEVICE_B
+  }), env(db));
 
   assert.equal(okResponse.status, 200);
   assert.equal((await readJson(okResponse)).ok, true);
   assert.equal(badResponse.status, 403);
   assert.equal((await readJson(badResponse)).error, "EMAIL_MISMATCH");
+  assert.equal(deviceResponse.status, 403);
+  assert.equal((await readJson(deviceResponse)).error, "DEVICE_MISMATCH");
 });
 
 test("verify marks expired licenses as expired", async () => {
@@ -364,7 +409,7 @@ test("verify marks expired licenses as expired", async () => {
     activated_at: "2020-01-01T00:00:00.000Z",
     expires_at: "2020-02-01T00:00:00.000Z",
     buyer_email: "student@example.com",
-    device_id: "device-a",
+    device_id: DEVICE_A,
     status: "active"
   });
 
@@ -389,7 +434,7 @@ test("renew extends an active license from its current expiry", async () => {
     activated_at: "2026-01-01T00:00:00.000Z",
     expires_at: "2999-01-01T00:00:00.000Z",
     buyer_email: "student@example.com",
-    device_id: "device-a",
+    device_id: DEVICE_A,
     status: "active"
   });
   db.addCode("AEPYRENEW001", {
@@ -413,6 +458,7 @@ test("renew extends an active license from its current expiry", async () => {
   assert.equal(db.activationCodes.get("AEPYRENEW001").status, "used");
   assert.equal(db.activationCodes.get("AEPYRENEW001").license_id, "lic_active");
   assert.equal(db.activationCodes.get("AEPYRENEW001").buyer_email, "student@example.com");
+  assert.equal(db.activationCodes.get("AEPYRENEW001").device_id, DEVICE_A);
 });
 
 test("renew reactivates an expired license from now", async () => {
@@ -425,7 +471,7 @@ test("renew reactivates an expired license from now", async () => {
     activated_at: "2020-01-01T00:00:00.000Z",
     expires_at: "2020-02-01T00:00:00.000Z",
     buyer_email: "student@example.com",
-    device_id: "device-a",
+    device_id: DEVICE_A,
     status: "expired"
   });
   db.addCode("AEPMRENEW002", {
@@ -450,7 +496,7 @@ test("renew reactivates an expired license from now", async () => {
   assert.ok(expiresAt <= after + 31 * 24 * 60 * 60 * 1000);
 });
 
-test("renew rejects mismatched email and cross-mode renewal code", async () => {
+test("renew rejects mismatched email, device, and cross-mode renewal code", async () => {
   const db = new FakeD1();
   db.licenses.set("lic_enterprise", {
     license_id: "lic_enterprise",
@@ -460,7 +506,7 @@ test("renew rejects mismatched email and cross-mode renewal code", async () => {
     activated_at: "2026-01-01T00:00:00.000Z",
     expires_at: "2999-01-01T00:00:00.000Z",
     buyer_email: "buyer@example.com",
-    device_id: "device-a",
+    device_id: DEVICE_A,
     status: "active"
   });
   db.addCode("AEPMBADMODE01", {
@@ -473,6 +519,12 @@ test("renew rejects mismatched email and cross-mode renewal code", async () => {
     code: "AE-PM-BADMODE-01",
     email: "other@example.com"
   }), env(db));
+  const deviceResponse = await worker.fetch(post("/api/license/renew", {
+    license_id: "lic_enterprise",
+    code: "AE-PM-BADMODE-01",
+    email: "buyer@example.com",
+    device_id: DEVICE_B
+  }), env(db));
   const modeResponse = await worker.fetch(post("/api/license/renew", {
     license_id: "lic_enterprise",
     code: "AE-PM-BADMODE-01",
@@ -481,6 +533,8 @@ test("renew rejects mismatched email and cross-mode renewal code", async () => {
 
   assert.equal(emailResponse.status, 403);
   assert.equal((await readJson(emailResponse)).error, "EMAIL_MISMATCH");
+  assert.equal(deviceResponse.status, 403);
+  assert.equal((await readJson(deviceResponse)).error, "DEVICE_MISMATCH");
   assert.equal(modeResponse.status, 400);
   assert.equal((await readJson(modeResponse)).error, "BAD_REQUEST");
   assert.equal(db.activationCodes.get("AEPMBADMODE01").status, "unused");
@@ -496,7 +550,7 @@ test("renew enforces pre-assigned purchase email on renewal codes", async () => 
     activated_at: "2026-01-01T00:00:00.000Z",
     expires_at: "2999-01-01T00:00:00.000Z",
     buyer_email: "buyer@example.com",
-    device_id: "",
+    device_id: DEVICE_A,
     status: "active"
   });
   db.addCode("AEPYRENEWBUYER", {
