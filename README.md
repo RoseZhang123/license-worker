@@ -21,6 +21,7 @@ Request:
 {
   "code": "AE-PY-XXXX-XXXX",
   "email": "buyer@example.com",
+  "device_id": "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "extension_version": "0.1.0"
 }
 ```
@@ -49,41 +50,8 @@ Request:
 ```json
 {
   "license_id": "lic_xxx",
-  "email": "buyer@example.com"
-}
-```
-
-### `POST /api/license/renew`
-
-Use this after a paid renewal. The renewal code must be unused and must match
-the existing license mode. Active licenses are extended from the current
-`expires_at`; expired licenses are extended from the current server time.
-
-Request:
-
-```json
-{
-  "license_id": "lic_xxx",
-  "code": "AE-PY-RENEW-XXXX",
-  "email": "buyer@example.com"
-}
-```
-
-Success:
-
-```json
-{
-  "ok": true,
-  "renewed": true,
-  "license": {
-    "license_id": "lic_xxx",
-    "mode": "consumer",
-    "plan": "PERSONAL_YEARLY",
-    "buyer_email": "buyer@example.com",
-    "activated_at": "2026-05-30T00:00:00.000Z",
-    "expires_at": "2028-05-30T00:00:00.000Z",
-    "status": "active"
-  }
+  "email": "buyer@example.com",
+  "device_id": "dev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }
 ```
 
@@ -196,8 +164,26 @@ The code remains `status = 'unused'` after issue. It becomes `used` only when
 the customer actually redeems it.
 
 The license database does not require or store an order id. Purchase email is
-the activation and renewal binding key; extra support context can go into
+the activation binding key; extra support context can go into
 `note` when needed.
+
+After a customer renews, do not issue a second activation code. Extend the
+existing license directly by purchase email and new plan:
+
+```bash
+npm run licenses:renew -- --plan PERSONAL_YEARLY --email buyer@example.com
+```
+
+If the customer has multiple licenses on the same email, pass the exact license:
+
+```bash
+npm run licenses:renew -- --plan ENTERPRISE_YEARLY --email buyer@example.com --license-id lic_xxx
+```
+
+The script updates only the `licenses` table. Active licenses are extended from
+their current `expires_at`; expired licenses are extended from the current server
+time. The customer sees the new expiry after the extension verifies the stored
+license again.
 
 6. Optional: enable feedback email notifications.
 
@@ -217,7 +203,7 @@ wrangler deploy
 - `b` / `c` development shortcuts should stay development-only.
 - The API currently allows same-email activation retry to return the existing
   active license. A different purchase email receives `CODE_ALREADY_USED`.
-- Renewal uses a new unused activation code and updates the existing license
-  instead of creating a second license.
+- Renewal is an operator action: update the existing license by email/plan with
+  `npm run licenses:renew`, then let the extension refresh via `/verify`.
 - If a buyer used the wrong purchase email, support can correct `buyer_email` or
   revoke and reissue a license after confirming the order.
