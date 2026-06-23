@@ -424,150 +424,37 @@ test("verify marks expired licenses as expired", async () => {
   assert.equal(db.licenses.get("lic_expired").status, "expired");
 });
 
-test("renew extends an active license from its current expiry", async () => {
-  const db = new FakeD1();
-  db.licenses.set("lic_active", {
-    license_id: "lic_active",
-    code: "ORIGINAL",
-    plan: "PERSONAL_MONTHLY",
-    mode: "consumer",
-    activated_at: "2026-01-01T00:00:00.000Z",
-    expires_at: "2999-01-01T00:00:00.000Z",
-    buyer_email: "student@example.com",
-    device_id: DEVICE_A,
-    status: "active"
-  });
-  db.addCode("AEPYRENEW001", {
-    plan: "PERSONAL_YEARLY",
-    mode: "consumer"
-  });
-
+test("license renewal is an operator-side license update, not a public code endpoint", async () => {
   const response = await worker.fetch(post("/api/license/renew", {
     license_id: "lic_active",
     code: "AE-PY-RENEW-001",
     email: "student@example.com"
-  }), env(db));
-  const body = await readJson(response);
+  }), env());
 
-  assert.equal(response.status, 200);
-  assert.equal(body.ok, true);
-  assert.equal(body.renewed, true);
-  assert.equal(body.license.license_id, "lic_active");
-  assert.equal(body.license.plan, "PERSONAL_YEARLY");
-  assert.equal(body.license.expires_at, "3000-01-01T00:00:00.000Z");
-  assert.equal(db.activationCodes.get("AEPYRENEW001").status, "used");
-  assert.equal(db.activationCodes.get("AEPYRENEW001").license_id, "lic_active");
-  assert.equal(db.activationCodes.get("AEPYRENEW001").buyer_email, "student@example.com");
-  assert.equal(db.activationCodes.get("AEPYRENEW001").device_id, DEVICE_A);
+  assert.equal(response.status, 400);
+  assert.equal((await readJson(response)).error, "BAD_REQUEST");
 });
 
-test("renew reactivates an expired license from now", async () => {
-  const db = new FakeD1();
-  db.licenses.set("lic_old", {
-    license_id: "lic_old",
-    code: "ORIGINAL",
-    plan: "PERSONAL_MONTHLY",
-    mode: "consumer",
-    activated_at: "2020-01-01T00:00:00.000Z",
-    expires_at: "2020-02-01T00:00:00.000Z",
-    buyer_email: "student@example.com",
-    device_id: DEVICE_A,
-    status: "expired"
-  });
-  db.addCode("AEPMRENEW002", {
-    plan: "PERSONAL_MONTHLY",
-    mode: "consumer"
+test("renew-license dry-run extends licenses without consuming activation codes", () => {
+  const output = execFileSync("node", [
+    "scripts/renew-license.js",
+    "--plan", "PERSONAL_YEARLY",
+    "--email", "Buyer@Example.com",
+    "--license-id", "lic_target",
+    "--dry-run"
+  ], {
+    cwd: WORKER_ROOT,
+    encoding: "utf8"
   });
 
-  const before = Date.now();
-  const response = await worker.fetch(post("/api/license/renew", {
-    license_id: "lic_old",
-    code: "AE-PM-RENEW-002",
-    email: "student@example.com"
-  }), env(db));
-  const after = Date.now();
-  const body = await readJson(response);
-  const expiresAt = new Date(body.license.expires_at).getTime();
-
-  assert.equal(response.status, 200);
-  assert.equal(body.ok, true);
-  assert.equal(body.license.status, "active");
-  assert.ok(expiresAt >= before + 29 * 24 * 60 * 60 * 1000);
-  assert.ok(expiresAt <= after + 31 * 24 * 60 * 60 * 1000);
-});
-
-test("renew rejects mismatched email, device, and cross-mode renewal code", async () => {
-  const db = new FakeD1();
-  db.licenses.set("lic_enterprise", {
-    license_id: "lic_enterprise",
-    code: "ORIGINAL",
-    plan: "ENTERPRISE_MONTHLY",
-    mode: "enterprise",
-    activated_at: "2026-01-01T00:00:00.000Z",
-    expires_at: "2999-01-01T00:00:00.000Z",
-    buyer_email: "buyer@example.com",
-    device_id: DEVICE_A,
-    status: "active"
-  });
-  db.addCode("AEPMBADMODE01", {
-    plan: "PERSONAL_MONTHLY",
-    mode: "consumer"
-  });
-
-  const emailResponse = await worker.fetch(post("/api/license/renew", {
-    license_id: "lic_enterprise",
-    code: "AE-PM-BADMODE-01",
-    email: "other@example.com"
-  }), env(db));
-  const deviceResponse = await worker.fetch(post("/api/license/renew", {
-    license_id: "lic_enterprise",
-    code: "AE-PM-BADMODE-01",
-    email: "buyer@example.com",
-    device_id: DEVICE_B
-  }), env(db));
-  const modeResponse = await worker.fetch(post("/api/license/renew", {
-    license_id: "lic_enterprise",
-    code: "AE-PM-BADMODE-01",
-    email: "buyer@example.com"
-  }), env(db));
-
-  assert.equal(emailResponse.status, 403);
-  assert.equal((await readJson(emailResponse)).error, "EMAIL_MISMATCH");
-  assert.equal(deviceResponse.status, 403);
-  assert.equal((await readJson(deviceResponse)).error, "DEVICE_MISMATCH");
-  assert.equal(modeResponse.status, 400);
-  assert.equal((await readJson(modeResponse)).error, "BAD_REQUEST");
-  assert.equal(db.activationCodes.get("AEPMBADMODE01").status, "unused");
-});
-
-test("renew enforces pre-assigned purchase email on renewal codes", async () => {
-  const db = new FakeD1();
-  db.licenses.set("lic_consumer", {
-    license_id: "lic_consumer",
-    code: "ORIGINAL",
-    plan: "PERSONAL_MONTHLY",
-    mode: "consumer",
-    activated_at: "2026-01-01T00:00:00.000Z",
-    expires_at: "2999-01-01T00:00:00.000Z",
-    buyer_email: "buyer@example.com",
-    device_id: DEVICE_A,
-    status: "active"
-  });
-  db.addCode("AEPYRENEWBUYER", {
-    plan: "PERSONAL_YEARLY",
-    mode: "consumer",
-    buyer_email: "another@example.com"
-  });
-
-  const response = await worker.fetch(post("/api/license/renew", {
-    license_id: "lic_consumer",
-    code: "AE-PY-RENEW-BUYER",
-    email: "buyer@example.com"
-  }), env(db));
-
-  assert.equal(response.status, 403);
-  assert.equal((await readJson(response)).error, "EMAIL_MISMATCH");
-  assert.equal(db.activationCodes.get("AEPYRENEWBUYER").status, "unused");
+  assert.match(output, /UPDATE licenses/);
+  assert.match(output, /plan = 'PERSONAL_YEARLY'/);
+  assert.match(output, /buyer_email = 'buyer@example\.com'/);
+  assert.match(output, /mode = 'consumer'/);
+  assert.match(output, /license_id = 'lic_target'/);
+  assert.match(output, /\+12 months/);
+  assert.match(output, /WHEN datetime\(expires_at\) > datetime\('now'\)/);
+  assert.doesNotMatch(output, /UPDATE activation_codes/);
 });
 
 test("feedback endpoint validates payload and sends support email when configured", async () => {

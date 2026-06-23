@@ -275,50 +275,6 @@ async function verifyLicense(request, env) {
   return json({ ok: true, license: publicLicense(license) }, 200, env);
 }
 
-async function renewLicense(request, env) {
-  if (!checkRateLimit(request)) return errorResponse("RATE_LIMITED", env);
-  const body = await readJson(request);
-  const licenseId = String(body?.license_id || "").trim();
-  const code = normalizeCode(body?.code);
-  const email = normalizeEmail(body?.email);
-  const deviceId = normalizeDeviceId(body?.device_id);
-
-  if (!licenseId || !code || !email || !deviceId) return errorResponse("BAD_REQUEST", env);
-
-  const license = await findLicense(env.DB, licenseId);
-  if (!license) return errorResponse("LICENSE_NOT_FOUND", env);
-  if (license.buyer_email !== email) return errorResponse("EMAIL_MISMATCH", env);
-  if (license.device_id !== deviceId) return errorResponse("DEVICE_MISMATCH", env);
-  if (license.status === "revoked") return errorResponse("LICENSE_REVOKED", env);
-
-  const activation = await findActivationCode(env.DB, code);
-  if (!activation) return errorResponse("INVALID_CODE", env);
-  if (activation.status === "revoked") return errorResponse("CODE_REVOKED", env);
-  if (activation.status === "used") return errorResponse("CODE_ALREADY_USED", env);
-  if (activation.buyer_email && activation.buyer_email !== email) return errorResponse("EMAIL_MISMATCH", env);
-  if (activation.mode !== license.mode) return errorResponse("BAD_REQUEST", env);
-
-  const now = new Date();
-  const currentExpiry = new Date(license.expires_at);
-  const baseDate = currentExpiry.getTime() > now.getTime() ? currentExpiry : now;
-  const nextExpiry = addPlanPeriod(baseDate, activation.plan);
-
-  const update = await env.DB.prepare(
-    "UPDATE activation_codes SET status = 'used', used_at = ?, license_id = ?, buyer_email = ?, device_id = ? WHERE code = ? AND status = 'unused'"
-  ).bind(now.toISOString(), licenseId, email, deviceId, code).run();
-
-  if ((update.meta?.changes ?? 0) !== 1) {
-    return errorResponse("CODE_ALREADY_USED", env);
-  }
-
-  await env.DB.prepare(
-    "UPDATE licenses SET plan = ?, expires_at = ?, status = 'active' WHERE license_id = ?"
-  ).bind(activation.plan, nextExpiry.toISOString(), licenseId).run();
-
-  const renewed = await findLicense(env.DB, licenseId);
-  return json({ ok: true, license: publicLicense(renewed), renewed: true }, 200, env);
-}
-
 function buildFeedbackEmail(feedback) {
   const label = feedback.type === "bug" ? "Bug report" : "Improvement suggestion";
   const subject = `[ApplyEase] ${label}`;
@@ -407,7 +363,6 @@ async function route(request, env) {
 
   if (url.pathname === "/api/license/activate") return activateLicense(request, env);
   if (url.pathname === "/api/license/verify") return verifyLicense(request, env);
-  if (url.pathname === "/api/license/renew") return renewLicense(request, env);
   if (url.pathname === "/api/feedback") return submitFeedback(request, env);
   return errorResponse("BAD_REQUEST", env);
 }
