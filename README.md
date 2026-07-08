@@ -150,6 +150,33 @@ creates a new unused code. In every case it binds `buyer_email` immediately, so
 `/api/license/activate` only succeeds when the customer enters the same purchase
 email.
 
+### One email = one plan / one license
+
+Before issuing, `codes:issue` checks the purchase email and **refuses** (non-zero
+exit) to issue a second code when the email:
+
+| Email already has | `codes:issue` behavior |
+|---|---|
+| An unused code for the **same** plan | ✅ Returns it (idempotent — safe to rerun) |
+| Any **active license** (any plan) | 🚫 Refused — renew instead: `npm run licenses:renew` |
+| An unused code for a **different** plan | 🚫 Refused — one email can hold only one plan |
+| A **used** code but **no active license** (expired/anomalous) | 🚫 Refused — renew or use a different email |
+| Nothing | ✅ Issues normally |
+
+This keeps renewals unambiguous: one buyer email maps to exactly one license, so
+support never has to disambiguate `license_id`s. A new person needs a different
+purchase email. To renew, extend the existing license (see below). To force a
+second code past the check (rare), add `--force`:
+
+```bash
+npm run codes:issue -- --plan PERSONAL_YEARLY --email buyer@example.com --force
+```
+
+Refusals print a Chinese/English reason to stderr and exit non-zero, so scripts
+that call `codes:issue` will fail loudly instead of silently double-issuing.
+`--dry-run` skips the live conflict check (it does not query D1) but still prints
+the conflict-check SQL for inspection.
+
 Use `--dry-run` to inspect the SQL without touching D1:
 
 ```bash
@@ -174,7 +201,9 @@ existing license directly by purchase email and new plan:
 npm run licenses:renew -- --plan PERSONAL_YEARLY --email buyer@example.com
 ```
 
-If the customer has multiple licenses on the same email, pass the exact license:
+Because one email maps to exactly one license, renewal is keyed by purchase
+email alone — you do not normally need `--license-id`. It exists only for legacy
+data where a single email historically has multiple licenses:
 
 ```bash
 npm run licenses:renew -- --plan ENTERPRISE_YEARLY --email buyer@example.com --license-id lic_xxx
@@ -203,7 +232,11 @@ wrangler deploy
 - `b` / `c` development shortcuts should stay development-only.
 - The API currently allows same-email activation retry to return the existing
   active license. A different purchase email receives `CODE_ALREADY_USED`.
+- One email = one plan / one license: `codes:issue` refuses a second code for an
+  email that already has an active license or an unused code for another plan
+  (`--force` overrides). This makes renewal unambiguous.
 - Renewal is an operator action: update the existing license by email/plan with
-  `npm run licenses:renew`, then let the extension refresh via `/verify`.
+  `npm run licenses:renew` (no `--license-id` needed under the one-email-one-plan
+  policy), then let the extension refresh via `/verify`.
 - If a buyer used the wrong purchase email, support can correct `buyer_email` or
   revoke and reissue a license after confirming the order.
