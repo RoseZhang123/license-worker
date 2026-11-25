@@ -93,17 +93,57 @@ function escapeHtml(raw) {
     .replace(/'/g, "&#39;");
 }
 
+// Strip free text from the diagnostic before it is emailed (same rules as the extension's
+// reportSafeDetails). `message` can contain profile values (e.g. a school or degree name inside an
+// "option not available" warning) or raw runtime/portal errors; already-released extensions still
+// send it. Drop every `message`, keep only the leading lowercase code of `error`
+// ("constrained_no_match: student_profile..." -> "constrained_no_match"), keep `errorName` only if
+// it is a plain type name. Applied recursively.
+const DIAGNOSTIC_ERROR_CODE = /^[a-z][a-z0-9_]*/;
+
+function scrubDiagnostic(value) {
+  if (Array.isArray(value)) return value.map(scrubDiagnostic);
+  if (!value || typeof value !== "object") return value;
+  const safe = {};
+  for (const [key, inner] of Object.entries(value)) {
+    if (key === "message") continue;
+    if (key === "error") {
+      const code = String(inner ?? "").match(DIAGNOSTIC_ERROR_CODE)?.[0];
+      if (code) safe.error = code;
+      continue;
+    }
+    if (key === "errorName") {
+      if (/^[A-Za-z]+$/.test(String(inner ?? ""))) safe.errorName = inner;
+      continue;
+    }
+    safe[key] = scrubDiagnostic(inner);
+  }
+  return safe;
+}
+
+// Keep only origin + path, even if an older client sends a full URL.
+function sanitizePageUrl(raw) {
+  try {
+    const url = new URL(String(raw || ""));
+    return `${url.origin}${url.pathname}`.slice(0, 500);
+  } catch (e) {
+    return "";
+  }
+}
+
 function normalizeFeedbackPayload(body = {}) {
   const type = normalizeFeedbackType(body.type);
   const message = sanitizeMultiline(body.message, FEEDBACK_MESSAGE_MAX);
   const contact = sanitizeText(body.contact, FEEDBACK_CONTACT_MAX);
   const accountMode = sanitizeText(body.account_mode, 40);
   const licenseId = sanitizeText(body.license_id, 120);
-  const pageUrl = sanitizeText(body.page_url, 500);
+  const pageUrl = sanitizePageUrl(body.page_url);
   const extensionVersion = sanitizeText(body.extension_version, 40);
   const school = sanitizeText(body.page?.school, 40);
   const isApplicationForm = Boolean(body.page?.isApplicationForm);
-  const diagnostic = body.diagnostic && typeof body.diagnostic === "object" ? body.diagnostic : null;
+  const diagnostic = body.diagnostic && typeof body.diagnostic === "object" && !Array.isArray(body.diagnostic)
+    ? scrubDiagnostic(body.diagnostic)
+    : null;
   return { type, message, contact, accountMode, licenseId, pageUrl, extensionVersion, school, isApplicationForm, diagnostic };
 }
 

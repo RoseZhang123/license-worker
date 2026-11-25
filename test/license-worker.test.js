@@ -712,3 +712,35 @@ test("feedback endpoint rejects missing contact or too-short message", async () 
   assert.equal(badMessage.status, 400);
   assert.equal((await readJson(badMessage)).error, "BAD_REQUEST");
 });
+
+test("feedback scrubs free text from the diagnostic and query strings from page_url (old clients)", async () => {
+  const { env: testEnv, sent } = envWithEmail();
+  await worker.fetch(post("/api/feedback", diagnosticPayload({
+    page_url: "https://w5.ab.ust.hk/cgi-bin/x.r?f_appl_nbr=62600662171#top",
+    diagnostic: {
+      schema: "applyease_diagnostic_report_v1",
+      context: { accountMode: "consumer", message: "ctx Example University" },
+      events: [
+        { type: "manual_attention", details: {
+          message: "Degree: \"Example University Master\" is not available",
+          error: "constrained_no_match: student_profile.education[0].degree_type",
+          skippedCount: 1
+        } },
+        { type: "autofill_error", details: { errorName: "TypeError", message: "reading 'Zhang San'" } },
+        { type: "page_status_error", details: { errorName: "Error: Example University", error: "Example University rejected" } }
+      ]
+    }
+  })), testEnv);
+
+  assert.equal(sent.length, 1);
+  const attached = Buffer.from(sent[0].attachments[0].content, "base64").toString("utf8");
+  assert.doesNotMatch(attached, /Example University|Zhang San/);
+  const parsed = JSON.parse(attached);
+  assert.equal(parsed.events[0].details.error, "constrained_no_match");
+  assert.equal(parsed.events[0].details.skippedCount, 1);
+  assert.equal(parsed.events[1].details.errorName, "TypeError");
+  assert.equal("errorName" in parsed.events[2].details, false);
+  assert.equal("error" in parsed.events[2].details, false);
+  assert.match(sent[0].text, /Page: https:\/\/w5\.ab\.ust\.hk\/cgi-bin\/x\.r\n/);
+  assert.doesNotMatch(sent[0].text + sent[0].html, /62600662171/);
+});

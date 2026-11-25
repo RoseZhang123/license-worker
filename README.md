@@ -111,6 +111,10 @@ binding. If a diagnostic is present, the full JSON is attached
 A contact that looks like an email address is used only as Reply-To; the recipient
 always comes from `SUPPORT_EMAIL`.
 
+Before emailing, the worker strips free text from the diagnostic (drops every `message`,
+keeps only the leading lowercase code of `error`, keeps `errorName` only if it is a plain type
+name) and reduces `page_url` to origin + path. This also covers older extension versions.
+
 `SUPPORT_EMAIL` is a **secret** (`wrangler secret put SUPPORT_EMAIL`), not a var:
 this repository is public. If the binding, `SUPPORT_EMAIL` or
 `FEEDBACK_FROM_EMAIL` is missing, the endpoint fails closed with
