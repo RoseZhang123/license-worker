@@ -488,6 +488,94 @@ test("feedback endpoint validates payload and sends support email when configure
   assert.match(sent[0].text, /Diagnostic summary included: yes/);
   assert.match(sent[0].html, /Autofill stopped/);
   assert.match(sent[0].html, /applyease_diagnostic_report_v1/);
+  // Full diagnostic goes as a JSON attachment (no 12000-char truncation in the body any more).
+  assert.equal(sent[0].attachments.length, 1);
+  assert.equal(sent[0].attachments[0].type, "application/json");
+  assert.match(sent[0].attachments[0].filename, /^applyease-diagnostic-.+\.json$/);
+  const attached = JSON.parse(Buffer.from(sent[0].attachments[0].content, "base64").toString("utf8"));
+  assert.equal(attached.schema, "applyease_diagnostic_report_v1");
+});
+
+function diagnosticPayload(overrides = {}) {
+  return {
+    type: "diagnostic",
+    message: "保存不了",
+    contact: "",
+    account_mode: "consumer",
+    license_id: "lic_diag",
+    extension_version: "0.1.11",
+    page: { school: "hkust", isApplicationForm: true },
+    diagnostic: {
+      schema: "applyease_diagnostic_report_v1",
+      context: { accountMode: "consumer", school: "hkust" },
+      events: [{ type: "fill_failed", detail: { control: "学历·当前 GPA" } }]
+    },
+    ...overrides
+  };
+}
+
+test("diagnostic feedback: contact optional, short note ok, UTF-8 JSON attached, only to SUPPORT_EMAIL", async () => {
+  const { env: testEnv, sent } = envWithEmail();
+  const response = await worker.fetch(post("/api/feedback", diagnosticPayload()), testEnv);
+  const body = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.emailed, true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].to, "owner@example.com");
+  assert.equal(sent[0].replyTo, undefined, "no contact → no Reply-To");
+  assert.match(sent[0].subject, /Diagnostic report/);
+  assert.match(sent[0].subject, /lic_diag/);
+  assert.match(sent[0].text, /Contact: not provided/);
+  assert.match(sent[0].text, /保存不了/);
+  const attached = JSON.parse(Buffer.from(sent[0].attachments[0].content, "base64").toString("utf8"));
+  assert.equal(attached.events[0].detail.control, "学历·当前 GPA", "Chinese survives base64 round trip");
+});
+
+test("diagnostic feedback: a contact never becomes the recipient", async () => {
+  const { env: testEnv, sent } = envWithEmail();
+  await worker.fetch(post("/api/feedback", diagnosticPayload({ contact: "attacker@example.com" })), testEnv);
+  assert.equal(sent[0].to, "owner@example.com");
+  assert.equal(sent[0].replyTo, "attacker@example.com");
+});
+
+test("diagnostic feedback: rejects 1-char message, missing diagnostic, and oversize diagnostic", async () => {
+  const { env: testEnv, sent } = envWithEmail();
+  const tooShort = await worker.fetch(post("/api/feedback", diagnosticPayload({ message: "x" })), testEnv);
+  const noDiag = await worker.fetch(post("/api/feedback", diagnosticPayload({ diagnostic: null })), testEnv);
+  const huge = await worker.fetch(post("/api/feedback", diagnosticPayload({
+    diagnostic: { schema: "applyease_diagnostic_report_v1", events: [{ blob: "a".repeat(600 * 1024) }] }
+  })), testEnv);
+
+  assert.equal(tooShort.status, 400);
+  assert.equal(noDiag.status, 400);
+  assert.equal(huge.status, 413);
+  assert.equal((await readJson(huge)).error, "PAYLOAD_TOO_LARGE");
+  assert.equal(sent.length, 0);
+});
+
+test("feedback fails closed (503) when email is not configured, instead of ok-and-drop", async () => {
+  const noBinding = await worker.fetch(post("/api/feedback", diagnosticPayload()), env());
+  assert.equal(noBinding.status, 503);
+  assert.equal((await readJson(noBinding)).error, "FEEDBACK_UNAVAILABLE");
+
+  const { env: noRecipientEnv, sent } = envWithEmail();
+  delete noRecipientEnv.SUPPORT_EMAIL;
+  const noRecipient = await worker.fetch(post("/api/feedback", diagnosticPayload()), noRecipientEnv);
+  assert.equal(noRecipient.status, 503);
+  assert.equal(sent.length, 0);
+});
+
+test("feedback returns 502 when the email send throws", async () => {
+  const { env: testEnv } = envWithEmail();
+  testEnv.EMAIL.send = async () => {
+    const error = new Error("domain not configured");
+    error.code = "E_SENDER_DOMAIN_NOT_CONFIGURED";
+    throw error;
+  };
+  const response = await worker.fetch(post("/api/feedback", diagnosticPayload()), testEnv);
+  assert.equal(response.status, 502);
+  assert.equal((await readJson(response)).error, "FEEDBACK_SEND_FAILED");
 });
 
 // /api/config endpoint tests (Codex review #2 NEEDS WORK: tests + Authorization 文档化)

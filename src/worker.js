@@ -15,6 +15,9 @@ const ERROR_STATUS = {
   EMAIL_MISMATCH: 403,
   DEVICE_MISMATCH: 403,
   RATE_LIMITED: 429,
+  PAYLOAD_TOO_LARGE: 413,
+  FEEDBACK_SEND_FAILED: 502,
+  FEEDBACK_UNAVAILABLE: 503,
   SERVER_ERROR: 500
 };
 
@@ -22,6 +25,12 @@ const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const RATE_LIMIT_MAX = 30;
 const FEEDBACK_MESSAGE_MAX = 2000;
 const FEEDBACK_CONTACT_MAX = 160;
+// Bug / suggestion messages need some substance; a diagnostic report only needs a short note
+// such as "保存不了", because the attached diagnostic carries the details.
+const FEEDBACK_MESSAGE_MIN = 10;
+const DIAGNOSTIC_MESSAGE_MIN = 2;
+// The diagnostic is attached to the email as JSON. Cap it well under the 25 MiB message limit.
+const FEEDBACK_DIAGNOSTIC_MAX_BYTES = 512 * 1024;
 const rateBuckets = new Map();
 
 function corsHeaders(env = {}) {
@@ -58,7 +67,7 @@ function normalizeDeviceId(raw) {
 
 function normalizeFeedbackType(raw) {
   const value = String(raw || "").trim().toLowerCase();
-  return value === "bug" || value === "suggestion" ? value : "";
+  return value === "bug" || value === "suggestion" || value === "diagnostic" ? value : "";
 }
 
 function sanitizeText(raw, maxLength) {
@@ -275,13 +284,35 @@ async function verifyLicense(request, env) {
   return json({ ok: true, license: publicLicense(license) }, 200, env);
 }
 
+const FEEDBACK_LABELS = {
+  bug: "Bug report",
+  suggestion: "Improvement suggestion",
+  diagnostic: "Diagnostic report"
+};
+
+// UTF-8 safe base64 (btoa only accepts Latin-1). The diagnostic can contain Chinese field labels.
+function toBase64Utf8(text) {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function diagnosticSummaryLine(diagnostic) {
+  const schema = typeof diagnostic?.schema === "string" ? diagnostic.schema : "unknown schema";
+  const events = Array.isArray(diagnostic?.events) ? diagnostic.events.length : 0;
+  return `${schema}, ${events} events (full JSON attached)`;
+}
+
 function buildFeedbackEmail(feedback) {
-  const label = feedback.type === "bug" ? "Bug report" : "Improvement suggestion";
-  const subject = `[ApplyEase] ${label}`;
+  const label = FEEDBACK_LABELS[feedback.type] || "Feedback";
+  const subject = `[ApplyEase] ${label}${feedback.licenseId ? ` (${feedback.licenseId})` : ""}`;
   const text = [
     `${label}`,
     "",
-    `Contact: ${feedback.contact}`,
+    `Contact: ${feedback.contact || "not provided"}`,
     `Account mode: ${feedback.accountMode || "unknown"}`,
     `License ID: ${feedback.licenseId || "not provided"}`,
     `Extension version: ${feedback.extensionVersion || "unknown"}`,
@@ -289,13 +320,14 @@ function buildFeedbackEmail(feedback) {
     `School: ${feedback.school || "unknown"}`,
     `Application form: ${feedback.isApplicationForm ? "yes" : "no"}`,
     `Diagnostic summary included: ${feedback.diagnostic ? "yes" : "no"}`,
+    ...(feedback.diagnostic ? [`Diagnostic: ${diagnosticSummaryLine(feedback.diagnostic)}`] : []),
     "",
     "Message:",
     feedback.message
   ].join("\n");
   const html = `
     <h2>${escapeHtml(label)}</h2>
-    <p><strong>Contact:</strong> ${escapeHtml(feedback.contact)}</p>
+    <p><strong>Contact:</strong> ${escapeHtml(feedback.contact || "not provided")}</p>
     <p><strong>Account mode:</strong> ${escapeHtml(feedback.accountMode || "unknown")}</p>
     <p><strong>License ID:</strong> ${escapeHtml(feedback.licenseId || "not provided")}</p>
     <p><strong>Extension version:</strong> ${escapeHtml(feedback.extensionVersion || "unknown")}</p>
@@ -305,9 +337,18 @@ function buildFeedbackEmail(feedback) {
     <p><strong>Diagnostic summary included:</strong> ${feedback.diagnostic ? "yes" : "no"}</p>
     <h3>Message</h3>
     <pre style="white-space:pre-wrap;font-family:system-ui,sans-serif">${escapeHtml(feedback.message)}</pre>
-    ${feedback.diagnostic ? `<h3>Diagnostic summary</h3><pre style="white-space:pre-wrap;font-family:ui-monospace,monospace">${escapeHtml(JSON.stringify(feedback.diagnostic, null, 2)).slice(0, 12000)}</pre>` : ""}
+    ${feedback.diagnostic ? `<p><strong>Diagnostic:</strong> ${escapeHtml(diagnosticSummaryLine(feedback.diagnostic))}</p>` : ""}
   `;
   return { subject, text, html };
+}
+
+function isValidFeedback(feedback) {
+  if (!feedback.type) return false;
+  if (feedback.type === "diagnostic") {
+    // Contact is optional here: the license ID identifies the user. The diagnostic itself is the point.
+    return feedback.message.length >= DIAGNOSTIC_MESSAGE_MIN && Boolean(feedback.diagnostic);
+  }
+  return feedback.message.length >= FEEDBACK_MESSAGE_MIN && Boolean(feedback.contact);
 }
 
 async function submitFeedback(request, env) {
@@ -316,35 +357,56 @@ async function submitFeedback(request, env) {
   if (!body) return errorResponse("BAD_REQUEST", env);
 
   const feedback = normalizeFeedbackPayload(body);
-  if (!feedback.type || feedback.message.length < 10 || !feedback.contact) {
-    return errorResponse("BAD_REQUEST", env);
+  if (!isValidFeedback(feedback)) return errorResponse("BAD_REQUEST", env);
+
+  const diagnosticJson = feedback.diagnostic ? JSON.stringify(feedback.diagnostic, null, 2) : "";
+  if (new TextEncoder().encode(diagnosticJson).length > FEEDBACK_DIAGNOSTIC_MAX_BYTES) {
+    return errorResponse("PAYLOAD_TOO_LARGE", env);
+  }
+
+  // Fail closed. The recipient comes only from the SUPPORT_EMAIL secret (never from the request, and
+  // never committed: this repo is public). Without email configured, tell the client instead of
+  // returning ok and silently dropping the feedback.
+  const to = env.SUPPORT_EMAIL;
+  const from = env.FEEDBACK_FROM_EMAIL;
+  if (!env.EMAIL?.send || !to || !from) {
+    console.warn("applyease feedback not delivered: email is not configured", {
+      type: feedback.type,
+      hasBinding: Boolean(env.EMAIL?.send),
+      hasRecipient: Boolean(to),
+      hasSender: Boolean(from)
+    });
+    return errorResponse("FEEDBACK_UNAVAILABLE", env);
   }
 
   const email = buildFeedbackEmail(feedback);
-  const to = env.SUPPORT_EMAIL || "support@applyease.cn";
-  const from = env.FEEDBACK_FROM_EMAIL || "support@applyease.cn";
-  let emailed = false;
-
-  if (env.EMAIL?.send) {
-    const emailPayload = {
-      to,
-      from: { email: from, name: "ApplyEase Feedback" },
-      subject: email.subject,
-      text: email.text,
-      html: email.html
-    };
-    if (feedback.contact.includes("@")) emailPayload.replyTo = feedback.contact;
-    await env.EMAIL.send(emailPayload);
-    emailed = true;
-  } else {
-    console.log("applyease feedback received", {
-      ...feedback,
-      messageLength: feedback.message.length,
-      message: undefined
-    });
+  const emailPayload = {
+    to,
+    from: { email: from, name: "ApplyEase Feedback" },
+    subject: email.subject,
+    text: email.text,
+    html: email.html
+  };
+  // The user's own contact only ever goes into Reply-To, never into the recipient list.
+  if (feedback.contact.includes("@")) emailPayload.replyTo = feedback.contact;
+  if (diagnosticJson) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    emailPayload.attachments = [{
+      content: toBase64Utf8(diagnosticJson),
+      filename: `applyease-diagnostic-${stamp}.json`,
+      type: "application/json",
+      disposition: "attachment"
+    }];
   }
 
-  return json({ ok: true, emailed }, 200, env);
+  try {
+    await env.EMAIL.send(emailPayload);
+  } catch (error) {
+    console.error("applyease feedback email failed", { type: feedback.type, code: error?.code || error?.name || "unknown" });
+    return errorResponse("FEEDBACK_SEND_FAILED", env);
+  }
+
+  return json({ ok: true, emailed: true }, 200, env);
 }
 
 async function route(request, env) {

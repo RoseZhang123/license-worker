@@ -6,11 +6,14 @@ workers_dev = true
 
 [vars]
 ALLOWED_ORIGIN = "*"
-SUPPORT_EMAIL = "support@applyease.cn"
-FEEDBACK_FROM_EMAIL = "support@applyease.cn"
+# Sender must be on a domain onboarded to Cloudflare Email Sending (apply-ease.com).
+FEEDBACK_FROM_EMAIL = "feedback@apply-ease.com"
+# The recipient is NOT set here: this repo is public. Set it as a secret:
+#   npx wrangler secret put SUPPORT_EMAIL
+# Feedback fails closed (HTTP 503) until both the binding and SUPPORT_EMAIL exist.
 
-# Enable after Cloudflare Email Sending is onboarded for the sender domain:
-# send_email = [{ name = "EMAIL" }]
+[[send_email]]
+name = "EMAIL"
 
 [[d1_databases]]
 binding = "DB"
