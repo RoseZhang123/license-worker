@@ -331,16 +331,6 @@ const FEEDBACK_LABELS = {
   diagnostic: "Diagnostic report"
 };
 
-// UTF-8 safe base64 (btoa only accepts Latin-1). The diagnostic can contain Chinese field labels.
-function toBase64Utf8(text) {
-  const bytes = new TextEncoder().encode(text);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(binary);
-}
-
 function diagnosticSummaryLine(diagnostic) {
   const schema = typeof diagnostic?.schema === "string" ? diagnostic.schema : "unknown schema";
   const events = Array.isArray(diagnostic?.events) ? diagnostic.events.length : 0;
@@ -433,7 +423,9 @@ async function submitFeedback(request, env) {
   if (diagnosticJson) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     emailPayload.attachments = [{
-      content: toBase64Utf8(diagnosticJson),
+      // Pass bytes, not a base64 string: the binding attaches a string as-is (a live test produced a
+      // .json file that contained base64 text). UTF-8 bytes keep Chinese field labels intact.
+      content: new TextEncoder().encode(diagnosticJson).buffer,
       filename: `applyease-diagnostic-${stamp}.json`,
       type: "application/json",
       disposition: "attachment"

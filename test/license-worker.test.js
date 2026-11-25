@@ -492,9 +492,15 @@ test("feedback endpoint validates payload and sends support email when configure
   assert.equal(sent[0].attachments.length, 1);
   assert.equal(sent[0].attachments[0].type, "application/json");
   assert.match(sent[0].attachments[0].filename, /^applyease-diagnostic-.+\.json$/);
-  const attached = JSON.parse(Buffer.from(sent[0].attachments[0].content, "base64").toString("utf8"));
+  const attached = JSON.parse(attachmentText(sent[0].attachments[0]));
   assert.equal(attached.schema, "applyease_diagnostic_report_v1");
 });
+
+// The worker attaches the diagnostic as raw UTF-8 bytes (an ArrayBuffer), not a base64 string.
+function attachmentText(attachment) {
+  assert.ok(attachment.content instanceof ArrayBuffer, "attachment content must be bytes, not a (base64) string");
+  return new TextDecoder().decode(attachment.content);
+}
 
 function diagnosticPayload(overrides = {}) {
   return {
@@ -528,8 +534,8 @@ test("diagnostic feedback: contact optional, short note ok, UTF-8 JSON attached,
   assert.match(sent[0].subject, /lic_diag/);
   assert.match(sent[0].text, /Contact: not provided/);
   assert.match(sent[0].text, /保存不了/);
-  const attached = JSON.parse(Buffer.from(sent[0].attachments[0].content, "base64").toString("utf8"));
-  assert.equal(attached.events[0].detail.control, "学历·当前 GPA", "Chinese survives base64 round trip");
+  const attached = JSON.parse(attachmentText(sent[0].attachments[0]));
+  assert.equal(attached.events[0].detail.control, "学历·当前 GPA", "Chinese survives the UTF-8 bytes round trip");
 });
 
 test("diagnostic feedback: a contact never becomes the recipient", async () => {
@@ -733,7 +739,7 @@ test("feedback scrubs free text from the diagnostic and query strings from page_
   })), testEnv);
 
   assert.equal(sent.length, 1);
-  const attached = Buffer.from(sent[0].attachments[0].content, "base64").toString("utf8");
+  const attached = attachmentText(sent[0].attachments[0]);
   assert.doesNotMatch(attached, /Example University|Zhang San/);
   const parsed = JSON.parse(attached);
   assert.equal(parsed.events[0].details.error, "constrained_no_match");
@@ -753,7 +759,7 @@ test("diagnostic error codes: whole code or code-before-colon only; lowercase se
       { type: "b", details: { error: "zhang san rejected the value" } }
     ] }
   })), testEnv);
-  const parsed = JSON.parse(Buffer.from(sent[0].attachments[0].content, "base64").toString("utf8"));
+  const parsed = JSON.parse(attachmentText(sent[0].attachments[0]));
   assert.equal(parsed.events[0].details.error, "popup_commit_failed");
   assert.equal("error" in parsed.events[1].details, false);
 });
