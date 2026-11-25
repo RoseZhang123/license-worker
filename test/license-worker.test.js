@@ -744,3 +744,16 @@ test("feedback scrubs free text from the diagnostic and query strings from page_
   assert.match(sent[0].text, /Page: https:\/\/w5\.ab\.ust\.hk\/cgi-bin\/x\.r\n/);
   assert.doesNotMatch(sent[0].text + sent[0].html, /62600662171/);
 });
+
+test("diagnostic error codes: whole code or code-before-colon only; lowercase sentences dropped", async () => {
+  const { env: testEnv, sent } = envWithEmail();
+  await worker.fetch(post("/api/feedback", diagnosticPayload({
+    diagnostic: { schema: "applyease_diagnostic_report_v1", events: [
+      { type: "a", details: { error: "popup_commit_failed" } },
+      { type: "b", details: { error: "zhang san rejected the value" } }
+    ] }
+  })), testEnv);
+  const parsed = JSON.parse(Buffer.from(sent[0].attachments[0].content, "base64").toString("utf8"));
+  assert.equal(parsed.events[0].details.error, "popup_commit_failed");
+  assert.equal("error" in parsed.events[1].details, false);
+});

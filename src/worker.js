@@ -99,7 +99,8 @@ function escapeHtml(raw) {
 // send it. Drop every `message`, keep only the leading lowercase code of `error`
 // ("constrained_no_match: student_profile..." -> "constrained_no_match"), keep `errorName` only if
 // it is a plain type name. Applied recursively.
-const DIAGNOSTIC_ERROR_CODE = /^[a-z][a-z0-9_]*/;
+// Whole code, or the code before a colon; "zhang san rejected" is dropped entirely.
+const DIAGNOSTIC_ERROR_CODE = /^([a-z][a-z0-9_]*)(?:\s*:|$)/;
 
 function scrubDiagnostic(value) {
   if (Array.isArray(value)) return value.map(scrubDiagnostic);
@@ -108,7 +109,7 @@ function scrubDiagnostic(value) {
   for (const [key, inner] of Object.entries(value)) {
     if (key === "message") continue;
     if (key === "error") {
-      const code = String(inner ?? "").match(DIAGNOSTIC_ERROR_CODE)?.[0];
+      const code = String(inner ?? "").trim().match(DIAGNOSTIC_ERROR_CODE)?.[1];
       if (code) safe.error = code;
       continue;
     }
