@@ -799,3 +799,15 @@ test("diagnostic strings are masked like the extension (url / email / long numbe
   const page = JSON.parse(attachmentText(sent[0].attachments[0])).events[0].details.page;
   assert.equal(page, "[url] [email] [number]");
 });
+
+test("diagnostic: malformed runtime is ignored and non-string errorName dropped (no 500)", async () => {
+  const { env: testEnv, sent } = envWithEmail();
+  const response = await worker.fetch(post("/api/feedback", diagnosticPayload({
+    diagnostic: { schema: "applyease_diagnostic_report_v1", runtime: "abc",
+      events: [{ type: "a", details: { errorName: [["ZhangSan"]] } }] }
+  })), testEnv);
+  assert.equal(response.status, 200);
+  const parsed = JSON.parse(attachmentText(sent[0].attachments[0]));
+  assert.deepEqual(parsed.runtime, {});
+  assert.equal("errorName" in parsed.events[0].details, false);
+});

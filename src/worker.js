@@ -152,7 +152,7 @@ function scrubDetails(details, depth = 0) {
       continue;
     }
     if (key === "errorName") {
-      if (/^[A-Za-z]+$/.test(String(inner ?? ""))) safe.errorName = inner;
+      if (typeof inner === "string" && /^[A-Za-z]+$/.test(inner)) safe.errorName = inner;
       continue;
     }
     safe[key] = scrubDetailValue(inner, depth);
@@ -162,8 +162,9 @@ function scrubDetails(details, depth = 0) {
 
 function scrubDiagnostic(report) {
   const runtime = {};
+  const rawRuntime = report.runtime && typeof report.runtime === "object" && !Array.isArray(report.runtime) ? report.runtime : {};
   for (const key of DIAGNOSTIC_RUNTIME_KEYS) {
-    if (report.runtime && key in report.runtime) runtime[key] = scrubScalar(report.runtime[key]);
+    if (key in rawRuntime) runtime[key] = scrubScalar(rawRuntime[key]);
   }
   const safe = {
     schema: scrubText(report.schema, 80),
