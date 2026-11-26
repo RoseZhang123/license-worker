@@ -111,9 +111,15 @@ binding. If a diagnostic is present, the full JSON is attached
 A contact that looks like an email address is used only as Reply-To; the recipient
 always comes from `SUPPORT_EMAIL`.
 
-Before emailing, the worker strips free text from the diagnostic (drops every `message`,
-keeps only the leading lowercase code of `error`, keeps `errorName` only if it is a plain type
-name) and reduces `page_url` to origin + path. This also covers older extension versions.
+Before emailing, the worker rebuilds the diagnostic from an allowlist: only the known report
+fields (`schema`, `generated_at`, `runtime`, `context`, `events[].at/type/details`,
+`trimmed_for_size`) and the known detail keys survive; any other key, at any level, is dropped.
+Strings are masked like the extension does (URLs, emails, ID-like and long numbers). Every
+`message` is dropped, `error` keeps only its leading lowercase code, and `errorName` is kept only
+if it is a plain type name. `page_url` is reduced to origin + path. This also covers older
+extension versions. Keep `DIAGNOSTIC_DETAIL_KEYS` in `src/worker.js` in sync with
+`ALLOWED_DETAIL_KEYS` in the extension's `diagnostics.js`: a key added only on the extension side
+is silently dropped here.
 
 `SUPPORT_EMAIL` is a **secret** (`wrangler secret put SUPPORT_EMAIL`), not a var:
 this repository is public. If the binding, `SUPPORT_EMAIL` or

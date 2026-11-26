@@ -514,7 +514,7 @@ function diagnosticPayload(overrides = {}) {
     diagnostic: {
       schema: "applyease_diagnostic_report_v1",
       context: { accountMode: "consumer", school: "hkust" },
-      events: [{ type: "fill_failed", detail: { control: "学历·当前 GPA" } }]
+      events: [{ type: "fill_fields", details: { page: "pg_ap_acadqual", fields: [{ n: "学历·当前 GPA", len: 3 }] } }]
     },
     ...overrides
   };
@@ -535,7 +535,7 @@ test("diagnostic feedback: contact optional, short note ok, UTF-8 JSON attached,
   assert.match(sent[0].text, /Contact: not provided/);
   assert.match(sent[0].text, /保存不了/);
   const attached = JSON.parse(attachmentText(sent[0].attachments[0]));
-  assert.equal(attached.events[0].detail.control, "学历·当前 GPA", "Chinese survives the UTF-8 bytes round trip");
+  assert.equal(attached.events[0].details.fields[0].n, "学历·当前 GPA", "Chinese survives the UTF-8 bytes round trip");
 });
 
 test("diagnostic feedback: a contact never becomes the recipient", async () => {
@@ -550,7 +550,7 @@ test("diagnostic feedback: rejects 1-char message, missing diagnostic, and overs
   const tooShort = await worker.fetch(post("/api/feedback", diagnosticPayload({ message: "x" })), testEnv);
   const noDiag = await worker.fetch(post("/api/feedback", diagnosticPayload({ diagnostic: null })), testEnv);
   const huge = await worker.fetch(post("/api/feedback", diagnosticPayload({
-    diagnostic: { schema: "applyease_diagnostic_report_v1", events: [{ blob: "a".repeat(600 * 1024) }] }
+    diagnostic: { schema: "applyease_diagnostic_report_v1", events: Array.from({ length: 60 }, () => ({ type: "fill_fields", details: { fields: Array.from({ length: 80 }, () => ({ n: "a".repeat(150) })) } })) }
   })), testEnv);
 
   assert.equal(tooShort.status, 400);
@@ -762,4 +762,52 @@ test("diagnostic error codes: whole code or code-before-colon only; lowercase se
   const parsed = JSON.parse(attachmentText(sent[0].attachments[0]));
   assert.equal(parsed.events[0].details.error, "popup_commit_failed");
   assert.equal("error" in parsed.events[1].details, false);
+});
+
+test("diagnostic is rebuilt from an allowlist: unknown keys at any level are dropped", async () => {
+  const { env: testEnv, sent } = envWithEmail();
+  await worker.fetch(post("/api/feedback", diagnosticPayload({
+    diagnostic: {
+      schema: "applyease_diagnostic_report_v1",
+      privacy_note: "x", leaked_top: "Zhang San",
+      runtime: { extension_version: "0.1.11", cookie: "Zhang San" },
+      context: { school: "hkust", profileName: "Zhang San" },
+      events: [{ at: "2026-11-25T00:00:00.000Z", type: "fill_fields", raw: "Zhang San", details: {
+        page: "p1", value: "Zhang San", label: "Zhang San",
+        fields: [{ n: "pNAME", len: 9, value: "Zhang San", extra: { deep: "Zhang San" } }]
+      } }],
+      trimmed_for_size: { original_events: 5, kept_events: 1, note: "Zhang San" }
+    }
+  })), testEnv);
+  const attached = attachmentText(sent[0].attachments[0]);
+  assert.doesNotMatch(attached, /Zhang San/);
+  const parsed = JSON.parse(attached);
+  assert.deepEqual(Object.keys(parsed).sort(), ["context", "events", "generated_at", "runtime", "schema", "trimmed_for_size"]);
+  assert.deepEqual(parsed.runtime, { extension_version: "0.1.11" });
+  assert.deepEqual(parsed.context, { school: "hkust" });
+  assert.deepEqual(parsed.events[0].details, { page: "p1", fields: [{ n: "pNAME", len: 9 }] });
+  assert.deepEqual(parsed.trimmed_for_size, { original_events: 5, kept_events: 1 });
+});
+
+test("diagnostic strings are masked like the extension (url / email / long number)", async () => {
+  const { env: testEnv, sent } = envWithEmail();
+  await worker.fetch(post("/api/feedback", diagnosticPayload({
+    diagnostic: { schema: "applyease_diagnostic_report_v1", events: [
+      { type: "a", details: { page: "https://x.test/a?id=1 a@b.co 62600662171" } }
+    ] }
+  })), testEnv);
+  const page = JSON.parse(attachmentText(sent[0].attachments[0])).events[0].details.page;
+  assert.equal(page, "[url] [email] [number]");
+});
+
+test("diagnostic: malformed runtime is ignored and non-string errorName dropped (no 500)", async () => {
+  const { env: testEnv, sent } = envWithEmail();
+  const response = await worker.fetch(post("/api/feedback", diagnosticPayload({
+    diagnostic: { schema: "applyease_diagnostic_report_v1", runtime: "abc",
+      events: [{ type: "a", details: { errorName: [["ZhangSan"]] } }] }
+  })), testEnv);
+  assert.equal(response.status, 200);
+  const parsed = JSON.parse(attachmentText(sent[0].attachments[0]));
+  assert.deepEqual(parsed.runtime, {});
+  assert.equal("errorName" in parsed.events[0].details, false);
 });
