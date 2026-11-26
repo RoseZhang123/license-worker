@@ -102,12 +102,50 @@ function escapeHtml(raw) {
 // Whole code, or the code before a colon; "zhang san rejected" is dropped entirely.
 const DIAGNOSTIC_ERROR_CODE = /^([a-z][a-z0-9_]*)(?:\s*:|$)/;
 
-function scrubDiagnostic(value) {
-  if (Array.isArray(value)) return value.map(scrubDiagnostic);
-  if (!value || typeof value !== "object") return value;
+// Allowlist, not denylist: the report is rebuilt from known fields only, so a key a future (or
+// modified) client adds is dropped instead of forwarded. Keep DIAGNOSTIC_DETAIL_KEYS in sync with
+// ALLOWED_DETAIL_KEYS in the extension's diagnostics.js (minus `message`, never forwarded).
+const DIAGNOSTIC_DETAIL_KEYS = new Set([
+  "action", "accountMode", "blockIndex", "controlCount", "durationMs", "error", "errorName", "event",
+  "hasProfile", "isApplicationForm", "matchCount", "missingCount", "needsRefresh", "ok", "pageSupported",
+  "popupDetected", "profileCount", "resetCache", "scopeKind", "school", "skippedCount", "totalBlocks",
+  "fields", "page", "n", "len", "max", "flags", "skip", "trunc", "outcome", "errorPage", "orig"
+]);
+const DIAGNOSTIC_RUNTIME_KEYS = ["extension_version", "manifest_version", "user_agent", "language", "platform"];
+const DIAGNOSTIC_MAX_EVENTS = 2000;
+const DIAGNOSTIC_MAX_ARRAY = 80;
+const DIAGNOSTIC_MAX_DEPTH = 4;
+
+// Same masking as the extension's sanitizeText (URLs, emails, ID-like and long numbers).
+function scrubText(raw, maxLength = 180) {
+  return String(raw ?? "")
+    .replace(/https?:\/\/\S+/gi, "[url]")
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email]")
+    .replace(/\b[A-Z][0-9]{6,}[A-Z0-9]?\b/g, "[id]")
+    .replace(/\b\d{6,}\b/g, "[number]")
+    .slice(0, maxLength);
+}
+
+function scrubScalar(value) {
+  if (value == null || typeof value === "boolean") return value ?? null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string") return scrubText(value);
+  return null;
+}
+
+function scrubDetailValue(value, depth) {
+  if (Array.isArray(value)) {
+    return depth >= DIAGNOSTIC_MAX_DEPTH ? [] : value.slice(0, DIAGNOSTIC_MAX_ARRAY).map((v) => scrubDetailValue(v, depth + 1));
+  }
+  if (value && typeof value === "object") return depth >= DIAGNOSTIC_MAX_DEPTH ? {} : scrubDetails(value, depth + 1);
+  return scrubScalar(value);
+}
+
+function scrubDetails(details, depth = 0) {
   const safe = {};
-  for (const [key, inner] of Object.entries(value)) {
-    if (key === "message") continue;
+  if (!details || typeof details !== "object" || Array.isArray(details)) return safe;
+  for (const [key, inner] of Object.entries(details)) {
+    if (!DIAGNOSTIC_DETAIL_KEYS.has(key)) continue;
     if (key === "error") {
       const code = String(inner ?? "").trim().match(DIAGNOSTIC_ERROR_CODE)?.[1];
       if (code) safe.error = code;
@@ -117,7 +155,33 @@ function scrubDiagnostic(value) {
       if (/^[A-Za-z]+$/.test(String(inner ?? ""))) safe.errorName = inner;
       continue;
     }
-    safe[key] = scrubDiagnostic(inner);
+    safe[key] = scrubDetailValue(inner, depth);
+  }
+  return safe;
+}
+
+function scrubDiagnostic(report) {
+  const runtime = {};
+  for (const key of DIAGNOSTIC_RUNTIME_KEYS) {
+    if (report.runtime && key in report.runtime) runtime[key] = scrubScalar(report.runtime[key]);
+  }
+  const safe = {
+    schema: scrubText(report.schema, 80),
+    generated_at: scrubText(report.generated_at, 40),
+    runtime,
+    context: scrubDetails(report.context),
+    events: (Array.isArray(report.events) ? report.events : []).slice(-DIAGNOSTIC_MAX_EVENTS).map((event) => ({
+      at: scrubText(event?.at, 40),
+      type: scrubText(event?.type, 80),
+      details: scrubDetails(event?.details)
+    }))
+  };
+  const trimmed = report.trimmed_for_size;
+  if (trimmed && typeof trimmed === "object") {
+    safe.trimmed_for_size = {
+      original_events: scrubScalar(Number(trimmed.original_events)),
+      kept_events: scrubScalar(Number(trimmed.kept_events))
+    };
   }
   return safe;
 }
